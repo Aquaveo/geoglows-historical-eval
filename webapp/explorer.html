@@ -1,0 +1,1907 @@
+<meta charset="utf-8">
+<!-- Required, not optional: this page uses ° · ² ³ – and Greek letters.
+     Over HTTP the server sends the charset, and the Artifact wrapper
+     injects one, but opening the file directly with file:// gives the
+     browser no declaration and it falls back to a locale guess --
+     Windows-1252 -- which turns every one of those into mojibake. -->
+<title>Gauge Skill Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+/* ---- tokens: complete light palette on bare :root ------------------------ */
+:root {
+  color-scheme: light;
+  --bg:        #f7f6f3;
+  --panel:     #fdfdfc;
+  --panel-2:   #f1efe9;
+  --ink:       #1a1a17;
+  --ink-2:     #55544e;
+  --ink-3:     #8a8880;
+  --rule:      #e3e1da;
+  --rule-2:    #d2cfc5;
+  --accent:    #b06c2b;
+  --accent-sf: #f6ecdd;
+  --shadow:    0 1px 2px rgba(26,26,23,.06), 0 8px 24px rgba(26,26,23,.07);
+  --land:      #efeee9;
+  --water:     #e6e7e4;
+  --ramp-mode: "light";
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg:        #131311;
+    --panel:     #1c1c19;
+    --panel-2:   #232320;
+    --ink:       #f2f1ec;
+    --ink-2:     #b4b2a8;
+    --ink-3:     #7e7c74;
+    --rule:      #2e2e29;
+    --rule-2:    #3d3c36;
+    --accent:    #d99544;
+    --accent-sf: #33261480;
+    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+    --land:      #1f1f1c;
+    --water:     #191917;
+    --ramp-mode: "dark";
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:        #131311;
+  --panel:     #1c1c19;
+  --panel-2:   #232320;
+  --ink:       #f2f1ec;
+  --ink-2:     #b4b2a8;
+  --ink-3:     #7e7c74;
+  --rule:      #2e2e29;
+  --rule-2:    #3d3c36;
+  --accent:    #d99544;
+  --accent-sf: #33261480;
+  --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  --land:      #1f1f1c;
+  --water:     #191917;
+  --ramp-mode: "dark";
+}
+
+* { box-sizing: border-box; }
+/* Must be !important: a class rule such as .ctl { display: flex }
+   otherwise outranks the browser default for [hidden]. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 14px/1.5 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.num { font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+       font-variant-numeric: tabular-nums; }
+
+.app { display: grid; grid-template-rows: auto 1fr; height: 100vh; height: 100dvh; }
+
+/* ---- toolbar ------------------------------------------------------------- */
+.bar {
+  display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+  padding: 11px 18px; background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+}
+.brand { display: flex; align-items: baseline; gap: 10px; margin-right: 4px; }
+.brand h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+.brand .sub { font-size: 11.5px; color: var(--ink-3); }
+
+.ctl { display: flex; align-items: center; gap: 8px; }
+.ctl > label {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-3); white-space: nowrap;
+}
+select, input[type="range"] { accent-color: var(--accent); }
+select {
+  font: inherit; font-size: 13px; color: var(--ink);
+  background: var(--panel-2); border: 1px solid var(--rule-2);
+  border-radius: 5px; padding: 4px 8px; cursor: pointer;
+}
+input[type="range"] { width: 116px; cursor: pointer; }
+.rdout { font-size: 12px; color: var(--ink-2); min-width: 46px; }
+
+.chips { display: flex; gap: 4px; }
+.chip {
+  font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer;
+  background: var(--panel-2); color: var(--ink-2);
+  border: 1px solid var(--rule-2); border-radius: 999px;
+}
+.chip[aria-pressed="true"] {
+  background: var(--accent-sf); border-color: var(--accent); color: var(--accent);
+  font-weight: 600;
+}
+.linkbtn {
+  font: inherit; font-size: 12px; background: none; border: none; cursor: pointer;
+  color: var(--accent); text-decoration: underline; text-underline-offset: 3px;
+  padding: 2px 0;
+}
+:is(button, select, input):focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+
+/* ---- tabs ---------------------------------------------------------------- */
+.tabs { display: inline-flex; border: 1px solid var(--rule-2); border-radius: 6px; overflow: hidden; }
+.tabs button {
+  font: inherit; font-size: 12.5px; font-weight: 500; padding: 4px 14px; cursor: pointer;
+  background: var(--panel-2); color: var(--ink-2); border: none;
+}
+.tabs button + button { border-left: 1px solid var(--rule-2); }
+.tabs button[aria-pressed="true"] { background: var(--accent-sf); color: var(--accent); font-weight: 600; }
+
+/* ---- summary view -------------------------------------------------------- */
+.summary { overflow-y: auto; padding: 24px 28px 48px; min-height: 0; }
+.summary .wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 30px; }
+.summary h2 {
+  margin: 0 0 3px; font-size: 19px; font-weight: 600; letter-spacing: -.01em;
+}
+.summary .lede { font-size: 13px; color: var(--ink-2); margin: 0; max-width: 62ch; }
+.summary section > h3 {
+  margin: 0 0 12px; font-size: 10px; font-weight: 600; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.tile {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 13px 15px;
+}
+.tile .k {
+  font-size: 10px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink-3); display: block; margin-bottom: 6px;
+}
+.tile .v { font-size: 26px; font-weight: 600; letter-spacing: -.02em; line-height: 1.05; display: block; }
+.tile .sub { font-size: 11px; color: var(--ink-3); margin-top: 3px; display: block; }
+
+.sumctl { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+
+table.grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.grid th {
+  text-align: right; font-size: 10px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--ink-3); white-space: nowrap;
+  /* Horizontal padding is not optional: with a dozen metric columns the
+     uppercase headers otherwise run into each other. */
+  padding: 0 0 7px 14px;
+}
+table.grid th:first-child, table.grid td:first-child { text-align: left; padding-left: 0; }
+table.grid td {
+  padding: 5px 0 5px 14px; text-align: right;
+  border-top: 1px solid var(--rule); white-space: nowrap;
+}
+/* A wide table stays readable by scrolling, never by shrinking. */
+.tblwrap table.grid { min-width: max-content; }
+table.grid td:first-child { color: var(--ink-2); }
+table.grid tbody tr:hover td { background: var(--panel-2); }
+.tblwrap { overflow-x: auto; }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: -1px; }
+
+/* ---- main split ---------------------------------------------------------- */
+.split { display: grid; grid-template-columns: 1fr 6px var(--rail-w, 384px); min-height: 0; }
+@media (max-width: 900px) {
+  .split { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; }
+  .gutter { display: none; }
+}
+
+.gutter {
+  cursor: col-resize; background: var(--rule); position: relative;
+  transition: background .12s;
+}
+.gutter::after {
+  content: ""; position: absolute; inset: 0 -4px;   /* wider hit target */
+}
+.gutter:hover, .gutter.dragging { background: var(--accent); }
+.gutter:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+body.resizing { cursor: col-resize; user-select: none; }
+
+
+/* 2x2 contingency table: the four counts laid out as the matrix they are,
+   rather than as an undifferentiated list of numbers. */
+.ctab { border-collapse: collapse; width: 100%; margin-top: 2px; }
+.ctab th {
+  font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--ink-3); padding: 0 0 6px; text-align: center; white-space: nowrap;
+}
+.ctab th.side { text-align: right; padding: 0 10px 0 0; width: 1%; }
+.ctab td {
+  border: 1px solid var(--rule); padding: 9px 6px; text-align: center;
+  background: var(--panel-2);
+}
+.ctab td .cnt { display: block; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+.ctab td .lab { display: block; font-size: 9.5px; color: var(--ink-3); margin-top: 2px;
+                text-transform: uppercase; letter-spacing: .05em; }
+.ctab td.hit  { background: color-mix(in srgb, var(--accent-sf) 70%, var(--panel)); }
+.ctab td.miss { background: var(--panel); }
+.ctab .axis {
+  font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* Prompt shown when a metric needs a month but none is chosen yet. */
+.prompt {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  max-width: 340px; text-align: center; z-index: 6;
+  background: var(--panel); border: 1px solid var(--rule-2); border-radius: 9px;
+  padding: 18px 22px; box-shadow: var(--shadow);
+}
+.prompt strong { display: block; font-size: 14.5px; margin-bottom: 5px; }
+.prompt span { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; }
+select.wants-input { border-color: var(--accent); background: var(--accent-sf); }
+
+.mapwrap { position: relative; min-width: 0; background: var(--water); }
+#map { display: block; width: 100%; height: 100%; cursor: grab; }
+#map.drag { cursor: grabbing; }
+
+.legend {
+  position: absolute; left: 14px; bottom: 14px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--rule); border-radius: 7px; padding: 9px 11px;
+  box-shadow: var(--shadow); backdrop-filter: blur(6px);
+}
+.legend .lab {
+  font-size: 10px; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-3); margin-bottom: 6px;
+}
+#lgbar { display: block; border-radius: 2px; }
+.lgticks {
+  display: flex; justify-content: space-between; margin-top: 3px;
+  font-size: 10.5px; color: var(--ink-2);
+}
+.lgnote { margin-top: 5px; font-size: 10.5px; color: var(--ink-3); }
+
+.zoomers { position: absolute; right: 14px; top: 14px; display: flex; flex-direction: column; gap: 5px; }
+.zoomers button {
+  width: 29px; height: 29px; font-size: 15px; line-height: 1; cursor: pointer;
+  background: var(--panel); color: var(--ink-2);
+  border: 1px solid var(--rule-2); border-radius: 6px; box-shadow: var(--shadow);
+}
+.zoomers button svg {
+  width: 14px; height: 14px; display: block; margin: 0 auto;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.zoomers button:hover { color: var(--accent); border-color: var(--accent); }
+
+#tip {
+  position: absolute; pointer-events: none; opacity: 0; transition: opacity .09s;
+  background: var(--ink); color: var(--bg); border-radius: 5px;
+  padding: 5px 8px; font-size: 11.5px; white-space: nowrap; z-index: 5;
+}
+#tip.on { opacity: 1; }
+
+/* ---- inspector rail ------------------------------------------------------ */
+.rail {
+  background: var(--panel); border-left: 1px solid var(--rule);
+  overflow-y: auto; padding: 16px 18px 28px; min-width: 0;
+}
+@media (max-width: 900px) { .rail { border-left: none; border-top: 1px solid var(--rule); } }
+
+.rail h2 {
+  margin: 0 0 2px; font-size: 16px; font-weight: 600; letter-spacing: -.01em;
+  text-wrap: balance;
+}
+.rail .eyebrow {
+  font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+.rail .meta { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+
+.sec { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.sec:first-of-type { border-top: none; padding-top: 0; }
+.sec > h3 {
+  margin: 0 0 10px; font-size: 10px; font-weight: 600; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+
+.hero { display: flex; align-items: baseline; gap: 9px; margin: 10px 0 2px; }
+.hero .v { font-size: 34px; font-weight: 600; letter-spacing: -.02em; line-height: 1; }
+.hero .u { font-size: 12px; color: var(--ink-3); }
+.verdict {
+  display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;
+  font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid currentColor;
+}
+.verdict .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+table.kv { width: 100%; border-collapse: collapse; }
+table.kv td { padding: 3.5px 0; font-size: 12.5px; vertical-align: baseline; }
+table.kv td:first-child { color: var(--ink-2); }
+table.kv td:last-child { text-align: right; font-weight: 500; }
+table.kv tr + tr td { border-top: 1px solid var(--rule); }
+
+.comp { display: grid; gap: 9px; }
+.comp .row { display: grid; grid-template-columns: 46px 1fr 52px; align-items: center; gap: 9px; }
+.comp .nm { font-size: 12px; color: var(--ink-2); }
+.comp .track {
+  position: relative; height: 7px; border-radius: 4px; background: var(--panel-2);
+  border: 1px solid var(--rule);
+}
+.comp .mid { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--rule-2); }
+.comp .fill { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.comp .vv { font-size: 12px; text-align: right; }
+
+/* Rank strip: positions by percentile, never by value, so a metric with a long
+   unbounded tail cannot squash the marker against one end. */
+.rank { margin-top: 2px; }
+.rank .say { font-size: 13px; color: var(--ink); line-height: 1.45; }
+.rank .say b { font-weight: 600; }
+.rank .strip {
+  position: relative; height: 8px; margin: 11px 0 5px; border-radius: 4px;
+  background: linear-gradient(to right, var(--panel-2), var(--rule-2));
+  border: 1px solid var(--rule);
+}
+.rank .pin {
+  position: absolute; top: -4px; bottom: -4px; width: 3px; border-radius: 2px;
+  background: var(--accent); transform: translateX(-1.5px);
+}
+.rank .ends {
+  display: flex; justify-content: space-between; font-size: 10px; color: var(--ink-3);
+}
+
+.empty { color: var(--ink-2); font-size: 13px; line-height: 1.6; }
+.chartcap { font-size: 11px; color: var(--ink-3); margin-top: 5px; line-height: 1.45; }
+svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
+.swatches { display: flex; gap: 14px; margin-bottom: 7px; font-size: 11.5px; color: var(--ink-2); }
+.swatches i { display: inline-block; width: 15px; height: 2.5px; vertical-align: middle;
+              margin-right: 5px; border-radius: 2px; }
+
+.footnote { margin-top: 22px; font-size: 11px; line-height: 1.55; color: var(--ink-3); }
+.footnote code { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style><style>
+/* ---- additions for the live version ------------------------------------- */
+.seg { display: inline-flex; border: 1px solid var(--rule-2); border-radius: 5px; overflow: hidden; }
+.seg button {
+  font: inherit; font-size: 11px; padding: 2px 8px; cursor: pointer;
+  background: var(--panel-2); color: var(--ink-2); border: none;
+}
+.seg button + button { border-left: 1px solid var(--rule-2); }
+.seg button[aria-pressed="true"] { background: var(--accent-sf); color: var(--accent); font-weight: 600; }
+
+.sechead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.sechead > h3 { margin: 0; font-size: 10px; font-weight: 600; letter-spacing: .1em;
+                text-transform: uppercase; color: var(--ink-3); }
+
+.hydro { position: relative; }
+.hydro canvas { display: block; width: 100%; height: 190px; cursor: grab; border-radius: 3px; }
+.hydro canvas.drag { cursor: grabbing; }
+.hydro .hint { font-size: 10.5px; color: var(--ink-3); margin-top: 4px; }
+
+.spin { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: 12.5px;
+        padding: 14px 0; }
+.spin .b { width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
+           animation: pulse 1.1s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity:.25; transform:scale(.8) } 50% { opacity:1; transform:scale(1) } }
+.err { color: var(--ink-2); font-size: 12.5px; background: var(--panel-2);
+       border: 1px solid var(--rule-2); border-radius: 5px; padding: 9px 11px; line-height: 1.5; }
+</style>
+
+<div class="app">
+  <div class="bar">
+    <div class="brand">
+      <h1>Gauge Skill Explorer</h1>
+      <span class="sub" id="brandsub">loading…</span>
+    </div>
+
+    <div class="tabs">
+      <button id="tabMap" aria-pressed="true">Map</button>
+      <button id="tabSum" aria-pressed="false">Summary</button>
+    </div>
+
+    <div class="ctl" id="metricCtl">
+      <label for="metric">Colour by</label>
+      <select id="metric"></select>
+    </div>
+
+    <div class="ctl" id="yrCtl">
+      <label for="minyr">Min record</label>
+      <input type="range" id="minyr" min="0" max="45" step="5" value="0">
+      <span class="rdout num" id="minyrOut">0 yr</span>
+    </div>
+
+    <div class="ctl" id="orderCtl">
+      <label>Stream order</label>
+      <div class="chips" id="orders"></div>
+    </div>
+
+    <div class="ctl" id="filtCtl">
+      <button class="chip" id="onlyBad" aria-pressed="false">Below no-skill only</button>
+      <button class="linkbtn" id="reset">Reset</button>
+    </div>
+  </div>
+
+  <div class="split">
+    <div class="mapwrap">
+      <canvas id="map"></canvas>
+      <div class="zoomers">
+        <!-- Icons are drawn as SVG rather than typed as glyphs: U+2212 and U+2922
+             are not in IBM Plex, so they silently fell back to another font. -->
+        <button id="zin" title="Zoom in" aria-label="Zoom in"><svg viewBox="0 0 16 16"
+          aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg></button>
+        <button id="zout" title="Zoom out" aria-label="Zoom out"><svg viewBox="0 0 16 16"
+          aria-hidden="true"><path d="M3.5 8h9"/></svg></button>
+        <button id="zfit" title="Fit to data" aria-label="Fit to data"><svg viewBox="0 0 16 16"
+          aria-hidden="true"><path d="M6.5 2.5H2.5v4M9.5 13.5h4v-4M2.5 9.5v4h4M13.5 6.5v-4h-4"/></svg></button>
+      </div>
+      <div class="legend">
+        <div class="lab" id="lgLab"></div>
+        <canvas id="lgbar" width="220" height="11"></canvas>
+        <div class="lgticks"><span class="num" id="lgLo"></span><span class="num" id="lgMid"></span><span class="num" id="lgHi"></span></div>
+        <div class="lgnote" id="lgNote"></div>
+      </div>
+      <div id="tip" class="num"></div>
+    </div>
+
+    <div class="gutter" id="gutter" role="separator" aria-orientation="vertical"
+         aria-label="Resize panel" tabindex="0"></div>
+    <aside class="rail" id="rail"></aside>
+  </div>
+
+  <div class="summary" id="summary" hidden></div>
+</div>
+
+<script type="application/json" id="payload">__DATA__</script>
+
+<script>
+(() => {
+"use strict";
+
+/* ---- one file, two deployments ------------------------------------------- #
+ * This page is the single source for both the local server and the published
+ * static build. They previously lived in separate files that drifted apart --
+ * a whole metric row went missing from one of them.
+ *
+ * build_webapp.py substitutes the payload into the JSON script tag above.
+ * serve.py leaves it alone, so an unsubstituted placeholder means "run live":
+ * fetch the gauge table from /api/gauges and each reach's daily series from
+ * /api/series on demand.
+ *
+ * The only behavioural difference is the per-gauge detail. Live mode has the
+ * full daily record so it draws a hydrograph and derives the flow-duration and
+ * monthly curves from it; the static build carries precomputed curves instead,
+ * because embedding daily values for every gauge would be ~208 MB.
+ */
+const EMBEDDED = (() => {
+  const el = document.getElementById("payload");
+  const raw = el ? el.textContent.trim() : "";
+  if (!raw || raw.startsWith("__")) return null;      // placeholder not substituted
+  try { return JSON.parse(raw); } catch (e) { return null; }
+})();
+const LIVE = !EMBEDDED;
+
+/* ---- metric definitions -------------------------------------------------- */
+const METRICS = [
+  {k:"kge_2012",    n:"KGE' (Kling 2012)",          dv:0, lo:-1, hi:1,   opt:1, dec:2},
+  {k:"ss_clim",     n:"Skill vs climatology"      , dv:0, lo:-1, hi:1,   opt:1, dec:2},
+  {k:"nse",         n:"NSE",                        dv:0, lo:-1, hi:1,   opt:1, dec:2},
+  {k:"r",           n:"Pearson r",                  dv:0, lo:-1, hi:1,   opt:1, dec:2},
+  {k:"spearman",    n:"Spearman ρ",                 dv:0, lo:-1, hi:1,   opt:1, dec:2},
+  {k:"gamma",       n:"Gamma (CV ratio)",           dv:1, lo:0,  hi:2,   opt:1, dec:2},
+  {k:"alpha",       n:"Alpha (σ ratio)",            dv:1, lo:0,  hi:2,   opt:1, dec:2},
+  {k:"beta",        n:"Beta (bias ratio)",          dv:1, lo:0,  hi:2,   opt:1, dec:2},
+  {k:"pbias_pct",   n:"PBIAS (%)",                  dv:0, lo:-100,hi:100,opt:0, dec:1},
+  {k:"pod",         n:"POD (detection)",           dv:0, lo:0,  hi:1,   opt:1, dec:2},
+  {k:"far",         n:"FAR (false alarms)",        seq:1, lo:0, hi:1,   opt:0, dec:2},
+  {k:"csi",         n:"CSI (threat score)",        dv:0, lo:0,  hi:1,   opt:1, dec:2},
+  {k:"ets",         n:"ETS (equitable threat)",    dv:0, lo:-0.5,hi:1,  opt:1, dec:2},
+  {k:"freq_bias",   n:"Frequency bias",            dv:1, lo:0,  hi:2,   opt:1, dec:2},
+  {k:"nrmse",       n:"NRMSE (÷ mean flow)",        seq:1, log:1, opt:0, dec:2},
+  {k:"mae_rel",     n:"MAE ÷ mean flow",            seq:1, lo:0, hi:3,   opt:0, dec:2},
+];
+const M = Object.fromEntries(METRICS.map(m => [m.k, m]));
+
+/* ---- colour -------------------------------------------------------------- */
+const RAMP_LIGHT = ["#661a1a","#8f2424","#b52f2f","#d03b3b","#dd625b","#ea8a84",
+                    "#f0efec",
+                    "#6da7ec","#3987e5","#2a78d6","#256abf","#184f95","#0d366b"];
+const RAMP_DARK  = ["#ffb3ac","#f58e85","#e5675e","#cf4a43","#9e3833","#6b2724",
+                    "#383835",
+                    "#1c4370","#20558f","#2a6db8","#3987e5","#6da7ec","#9ec5f4"];
+const SEQ_LIGHT  = ["#fbeceb","#f8d6d3","#f2b8b3","#ea9089","#dd6a61","#cf4a43",
+                    "#b52f2f","#8f2424","#661a1a"];
+const SEQ_DARK   = ["#3a2422","#5c2b28","#7d3330","#9e3833","#c04740","#dd6a61",
+                    "#ea9089","#f2b8b3","#fbeceb"];
+
+let RAMP = RAMP_LIGHT, SEQ = SEQ_LIGHT;
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const themeMode = () => (cssVar("--ramp-mode") || "").replace(/["'\s]/g, "") === "dark" ? "dark" : "light";
+function syncRamp() {
+  const d = themeMode() === "dark";
+  RAMP = d ? RAMP_DARK : RAMP_LIGHT;
+  SEQ  = d ? SEQ_DARK  : SEQ_LIGHT;
+}
+const hex2rgb = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+function interp(stops, t) {
+  t = Math.max(0, Math.min(1, t));
+  const x = t * (stops.length - 1), i = Math.floor(x), f = x - i;
+  if (i >= stops.length - 1) return stops[stops.length - 1];
+  const a = hex2rgb(stops[i]), b = hex2rgb(stops[i+1]);
+  return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;
+}
+function scalePos(m, v) {
+  if (m.seq) {
+    if (m.log) { const lo = Math.log10(m.lo), hi = Math.log10(m.hi);
+      return v > 0 ? (Math.log10(v) - lo) / (hi - lo) : 0; }
+    return (v - m.lo) / (m.hi - m.lo);
+  }
+  const c = m.dv;
+  return v >= c ? 0.5 + 0.5 * Math.min(1, (v - c) / (m.hi - c))
+                : 0.5 - 0.5 * Math.min(1, (c - v) / (c - m.lo));
+}
+function colorFor(m, v) {
+  if (v == null || !isFinite(v)) return null;
+  const t = Math.max(0, Math.min(1, scalePos(m, v)));
+  return m.seq ? interp(SEQ, t) : interp(RAMP, t);
+}
+
+/* ---- state --------------------------------------------------------------- */
+let D = null, ORDERS = [];
+const S = { metric:"kge_2012", month:null, minYears:0, orders:new Set(), onlyBad:false, sel:null, hover:null };
+const MONTH_NAMES = ["January","February","March","April","May","June",
+                     "July","August","September","October","November","December"];
+// Monthly metrics live in per-month columns (r_m01 .. r_m12) rather than one
+// column, so every read of "the current metric" goes through here.
+// No map metric is per-month any more; monthly numbers live in the rail table
+// and the summary tab. Kept as a single accessor so callers stay unchanged.
+function needsMonth() { return false; }
+function mkey() { return S.metric; }
+const mval = g => g[mkey()];
+const monthLabel = () => M[S.metric].n;
+
+const yearsOf = g => (g.n_pairs || 0) / 365.25;
+
+// The run label comes from --label on the command line and is interpolated into
+// innerHTML in three places, so it has to be escaped: a name containing < or &
+// would otherwise be parsed as markup rather than shown. The browser tab is set
+// with document.title, which takes text and needs no escaping.
+const escHtml = s => String(s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// run.json predating --label, or a payload built before it, has no label.
+const rawLabel = () => D.label || "GEOGLOWS v2 retrospective";
+const runLabel = () => escHtml(rawLabel());
+
+function visible() {
+  return D.gauges.filter(g => {
+    if (mval(g) == null) return false;
+    if (yearsOf(g) < S.minYears) return false;
+    if (g.so != null && !S.orders.has(g.so)) return false;
+    if (S.onlyBad && !(g.kge_2012 != null && g.kge_2012 < D.noSkill)) return false;
+    return true;
+  });
+}
+
+/* ---- map ----------------------------------------------------------------- */
+const cv = document.getElementById("map"), ctx = cv.getContext("2d");
+let W=0, H=0, base=1, ox=0, oy=0, KX=1, BX0=0, BY0=0, BX1=1, BY1=1;
+const view = { s:1, tx:0, ty:0 };
+
+function fit() {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const w = (BX1-BX0)*KX, h = (BY1-BY0);
+  base = Math.min((W-56)/w, (H-56)/h);
+  ox = W/2 - ((BX0+BX1)/2)*KX*base;
+  oy = H/2 + ((BY0+BY1)/2)*base;
+}
+const px = lon => (lon*KX*base + ox)*view.s + view.tx;
+const py = lat => (oy - lat*base)*view.s + view.ty;
+
+function drawLines(lines, stroke, width) {
+  if (!lines) return;
+  ctx.strokeStyle = stroke; ctx.lineWidth = width; ctx.beginPath();
+  for (const ln of lines) for (let i=0;i<ln.length;i++) {
+    const x = px(ln[i][0]), y = py(ln[i][1]);
+    i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  }
+  ctx.stroke();
+}
+
+function draw() {
+  if (!D) return;
+  const vis = needsMonth() ? [] : visible(), m = M[S.metric];
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = cssVar("--land"); ctx.fillRect(0,0,W,H);
+  const bm = D.basemap || {};
+  drawLines(bm.lakes,  cssVar("--rule"),   0.8);
+  drawLines(bm.states, cssVar("--rule-2"), 0.7);
+  drawLines(bm.coast,  cssVar("--ink-3"),  0.9);
+
+  // Best first, so the WORST gauges land on top. Last drawn wins, and hiding
+  // poor gauges under good ones would flatter the model where it matters most.
+  const order = vis.slice().sort((a,b) =>
+    Math.abs(mval(a)-m.opt) - Math.abs(mval(b)-m.opt));
+  const rad = Math.max(2.6, Math.min(6, 3.4*Math.sqrt(view.s)));
+  const ring = cssVar("--panel");
+  for (const g of order) {
+    const c = colorFor(m, mval(g)); if (!c) continue;
+    ctx.beginPath(); ctx.arc(px(g.lon), py(g.lat), rad, 0, 6.2832);
+    ctx.fillStyle = c; ctx.fill();
+    ctx.strokeStyle = ring; ctx.lineWidth = 0.7; ctx.stroke();
+  }
+  for (const g of [S.hover, S.sel]) {
+    if (!g) continue;
+    ctx.beginPath(); ctx.arc(px(g.lon), py(g.lat), rad+4.5, 0, 6.2832);
+    ctx.strokeStyle = cssVar("--accent"); ctx.lineWidth = 2.2; ctx.stroke();
+  }
+}
+
+function nearest(mx,my) {
+  let best=null, bd=196;
+  for (const g of visible()) {
+    const dx = px(g.lon)-mx, dy = py(g.lat)-my, d = dx*dx+dy*dy;
+    if (d < bd) { bd = d; best = g; }
+  }
+  return best;
+}
+
+/* ---- small SVG charts ---------------------------------------------------- */
+const NS = "http://www.w3.org/2000/svg";
+const el = (t,a) => { const e = document.createElementNS(NS,t);
+  for (const k in a) e.setAttribute(k,a[k]); return e; };
+const fmt = (v,d=2) => v==null || !isFinite(v) ? "—" : Number(v).toFixed(d);
+const sig = v => { if (v==null || !isFinite(v)) return "—"; const a = Math.abs(v);
+  return a>=1000 ? v.toFixed(0) : a>=10 ? v.toFixed(1) : a>=1 ? v.toFixed(2) : v.toFixed(3); };
+const median = a => { const v = a.filter(x=>x!=null&&isFinite(x)).sort((p,q)=>p-q);
+  return v.length ? (v.length%2 ? v[(v.length-1)/2] : (v[v.length/2-1]+v[v.length/2])/2) : null; };
+
+function lineChart({w=336,h=132,pad=[8,8,20,36],xs,series,logY,xTicks,yFmt}) {
+  const [pt,pr,pb,pl] = pad;
+  const svg = el("svg",{class:"chart",viewBox:`0 0 ${w} ${h}`,preserveAspectRatio:"none",role:"img"});
+  const iw = w-pl-pr, ih = h-pt-pb;
+  const all = series.flatMap(s=>s.v).filter(v=>v!=null&&isFinite(v)&&(!logY||v>0));
+  if (!all.length) return svg;
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (logY) { lo = Math.log10(lo); hi = Math.log10(hi); }
+  if (hi-lo < 1e-9) hi = lo+1;
+  const p = (hi-lo)*0.06; lo -= p; hi += p;
+  const Y = v => { if (v==null||!isFinite(v)||(logY&&v<=0)) return null;
+    return pt + ih - (((logY?Math.log10(v):v)-lo)/(hi-lo))*ih; };
+  const X = i => pl + (xs.length===1 ? iw/2 : (i/(xs.length-1))*iw);
+  for (let k=0;k<=2;k++) {
+    const y = pt+(k/2)*ih;
+    svg.appendChild(el("line",{x1:pl,x2:pl+iw,y1:y,y2:y,stroke:cssVar("--rule"),"stroke-width":1}));
+    const val = logY ? Math.pow(10, hi-(k/2)*(hi-lo)) : hi-(k/2)*(hi-lo);
+    const t = el("text",{x:pl-5,y:y+3.5,"text-anchor":"end","font-size":9,
+      fill:cssVar("--ink-3"),"font-family":"IBM Plex Mono, monospace"});
+    t.textContent = yFmt(val); svg.appendChild(t);
+  }
+  (xTicks||[]).forEach(({i,label}) => {
+    const t = el("text",{x:X(i),y:h-6,"text-anchor":"middle","font-size":9,
+      fill:cssVar("--ink-3"),"font-family":"IBM Plex Mono, monospace"});
+    t.textContent = label; svg.appendChild(t);
+  });
+  for (const s of series) {
+    let d="", pen=false;
+    s.v.forEach((v,i) => { const y = Y(v);
+      if (y==null) { pen=false; return; }
+      d += (pen?"L":"M") + X(i).toFixed(1) + " " + y.toFixed(1) + " "; pen=true; });
+    if (d) svg.appendChild(el("path",{d,fill:"none",stroke:s.c,"stroke-width":s.w||2,
+      "stroke-linejoin":"round","stroke-linecap":"round","stroke-dasharray":s.dash||"none"}));
+  }
+  return svg;
+}
+
+function ecdfChart(vals, mark) {
+  const w = 336, h = 116, pl = 36, pr = 8, pt = 8, pb = 28;
+  const svg = el("svg", { class: "chart", viewBox: `0 0 ${w} ${h}`, preserveAspectRatio: "none" });
+  const v = vals.filter(x => x != null && isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return svg;
+  const m = M[S.metric], iw = w - pl - pr, ih = h - pt - pb;
+
+  // The axis follows the DATA, not the metric's display range. KGE', NSE and the
+  // skill scores are unbounded below -- worst values here reach -300, -10600 and
+  // -9548 -- so a fixed -1..1 axis silently dropped 10%, 19% and 22% of the
+  // distribution respectively, and the curve started partway down instead of at
+  // 100%. Trimmed to the 2nd-98th percentile so one catastrophic gauge cannot
+  // flatten the whole curve, with the count outside stated.
+  const q = (p) => v[Math.min(v.length - 1, Math.round(p * (v.length - 1)))];
+  let lo = q(0.02), hi = q(0.98);
+  if (m.hi != null) hi = Math.min(hi, m.hi);          // r and KGE' cannot exceed 1
+  if (!(hi > lo)) hi = lo + (Math.abs(lo) || 1) * 0.1;
+  const useLog = !!m.log && lo > 0;
+  const pos = x => useLog
+    ? (Math.log10(x) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))
+    : (x - lo) / (hi - lo);
+  const X = x => pl + Math.max(0, Math.min(1, pos(x))) * iw;
+  const Y = p => pt + ih - p * ih;
+
+  for (let k = 0; k <= 2; k++) {
+    const y = pt + (k / 2) * ih;
+    svg.appendChild(el("line", { x1: pl, x2: pl + iw, y1: y, y2: y,
+      stroke: cssVar("--rule"), "stroke-width": 1 }));
+    const t = el("text", { x: pl - 5, y: y + 3.5, "text-anchor": "end", "font-size": 9,
+      fill: cssVar("--ink-3"), "font-family": "IBM Plex Mono, monospace" });
+    t.textContent = (100 - k * 50) + "%"; svg.appendChild(t);
+  }
+
+  let d = "";
+  for (let i = 0; i < v.length; i++)
+    d += (i ? "L" : "M") + X(v[i]).toFixed(1) + " " + Y(1 - i / v.length).toFixed(1) + " ";
+  svg.appendChild(el("path", { d, fill: "none", stroke: cssVar("--ink-2"),
+    "stroke-width": 2, "stroke-linejoin": "round" }));
+
+  if (m.k && m.k.startsWith("kge") && D.noSkill > lo && D.noSkill < hi) {
+    svg.appendChild(el("line", { x1: X(D.noSkill), x2: X(D.noSkill), y1: pt, y2: pt + ih,
+      stroke: cssVar("--ink-3"), "stroke-width": 1, "stroke-dasharray": "3 3" }));
+  }
+
+  if (mark != null && isFinite(mark)) {
+    const off = mark < lo ? -1 : mark > hi ? 1 : 0;
+    const x = X(mark);
+    svg.appendChild(el("line", { x1: x, x2: x, y1: pt, y2: pt + ih,
+      stroke: cssVar("--accent"), "stroke-width": 2,
+      "stroke-dasharray": off ? "3 2" : "none" }));
+    // A clamped marker is otherwise indistinguishable from one sitting exactly
+    // on the axis end, so flag off-scale explicitly.
+    if (off) {
+      const t = el("text", { x: x + off * 5, y: pt + 8, "font-size": 9,
+        "text-anchor": off < 0 ? "start" : "end", fill: cssVar("--accent"),
+        "font-family": "IBM Plex Mono, monospace" });
+      t.textContent = (off < 0 ? "< " : "> ") + fmt(mark, m.dec); svg.appendChild(t);
+    }
+  }
+
+  [lo, hi].forEach((x, i) => {
+    const t = el("text", { x: i ? pl + iw : pl, y: h - 16, "text-anchor": i ? "end" : "start",
+      "font-size": 9, fill: cssVar("--ink-3"), "font-family": "IBM Plex Mono, monospace" });
+    t.textContent = sig(x); svg.appendChild(t);
+  });
+  const nOut = v.filter(x => x < lo || x > hi).length;
+  if (nOut) {
+    const t = el("text", { x: pl + iw / 2, y: h - 3, "text-anchor": "middle", "font-size": 8.5,
+      fill: cssVar("--ink-3") });
+    t.textContent = `axis trimmed to 2nd–98th percentile · ${nOut} of ${v.length} outside`;
+    svg.appendChild(t);
+  }
+  return svg;
+}
+
+/* ---- hydrograph ---------------------------------------------------------- */
+// The daily arrays arrive per click, so the FDC and monthly regime are derived
+// here rather than shipped -- they are just reductions of the same data.
+const FDC_EX = [0.1,0.5,1,2,5,10,20,30,40,50,60,70,80,90,95,98,99,99.9];
+
+function quantiles(arr, exceed) {
+  const v = arr.filter(x => x!=null && isFinite(x)).sort((a,b)=>a-b);
+  if (!v.length) return exceed.map(()=>null);
+  return exceed.map(p => {
+    const q = 1 - p/100, i = q*(v.length-1), lo = Math.floor(i), f = i-lo;
+    return lo >= v.length-1 ? v[v.length-1] : v[lo] + (v[lo+1]-v[lo])*f;
+  });
+}
+
+const HY = { data:null, i0:0, i1:0, log:true, drag:null };
+
+function pairedOnly(sim, obs) {
+  const a=[], b=[];
+  for (let i=0;i<sim.length;i++)
+    if (sim[i]!=null && obs[i]!=null) { a.push(sim[i]); b.push(obs[i]); }
+  return [a,b];
+}
+
+function monthlyMeans(arr, t0ms) {
+  const sum = new Array(12).fill(0), cnt = new Array(12).fill(0);
+  const d = new Date(t0ms);
+  for (let i=0;i<arr.length;i++) {
+    if (arr[i]!=null) { const mo = new Date(t0ms + i*86400000).getUTCMonth();
+      sum[mo]+=arr[i]; cnt[mo]++; }
+  }
+  return sum.map((s,i)=>cnt[i] ? s/cnt[i] : null);
+}
+
+function drawHydro() {
+  const c = document.getElementById("hycv"); if (!c || !HY.data) return;
+  const g = c.getContext("2d"), r = c.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(r.width*dpr); c.height = Math.round(r.height*dpr);
+  g.setTransform(dpr,0,0,dpr,0,0);
+  const w = r.width, h = r.height, pl = 42, pr = 6, pt = 8, pb = 18;
+  const iw = w-pl-pr, ih = h-pt-pb;
+  g.clearRect(0,0,w,h);
+
+  const {sim, obs, clim, doy0, t0ms} = HY.data;
+  const i0 = HY.i0, i1 = HY.i1, n = i1-i0;
+  const LOG = HY.log;
+
+  // Range over the visible window only, so zooming actually rescales.
+  let lo = Infinity, hi = -Infinity;
+  for (let i=i0;i<i1;i++) {
+    for (const a of [sim, obs]) {
+      const v = a[i];
+      if (v!=null && isFinite(v) && (!LOG || v>0)) { if (v<lo) lo=v; if (v>hi) hi=v; }
+    }
+  }
+  if (!isFinite(lo)) { lo = LOG ? 0.01 : 0; hi = 1; }
+  let L = LOG ? Math.log10(Math.max(lo,1e-4)) : lo, Hh = LOG ? Math.log10(hi) : hi;
+  if (Hh-L < 1e-9) Hh = L+1;
+  const padv = (Hh-L)*0.07; L -= padv; Hh += padv;
+  const Y = v => (v==null || !isFinite(v) || (LOG && v<=0)) ? null
+    : pt + ih - (((LOG?Math.log10(v):v)-L)/(Hh-L))*ih;
+  const X = i => pl + ((i-i0)/Math.max(1,n-1))*iw;
+
+  g.strokeStyle = cssVar("--rule"); g.lineWidth = 1;
+  g.font = '9px "IBM Plex Mono", monospace'; g.textBaseline = "middle";
+  for (let k=0;k<=3;k++) {
+    const y = pt + (k/3)*ih;
+    g.beginPath(); g.moveTo(pl,y); g.lineTo(pl+iw,y); g.stroke();
+    const val = LOG ? Math.pow(10, Hh-(k/3)*(Hh-L)) : Hh-(k/3)*(Hh-L);
+    g.fillStyle = cssVar("--ink-3"); g.textAlign = "right";
+    g.fillText(sig(val), pl-5, y);
+  }
+
+  // Time ticks. Granularity has to follow the zoom: labelling only 1 January
+  // means a window shorter than a year -- or one that simply contains no
+  // 1 January -- gets no labels at all.
+  const MON3 = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const dayOf = i => new Date(t0ms + i * 86400000);
+  const ticks = [];
+  if (n > 2200) {                                   // multi-year: year starts
+    const y0 = dayOf(i0).getUTCFullYear(), y1 = dayOf(i1 - 1).getUTCFullYear();
+    const step = Math.max(1, Math.ceil((y1 - y0 + 1) / 6));
+    for (let yy = Math.ceil(y0 / step) * step; yy <= y1; yy += step) {
+      const idx = Math.round((Date.UTC(yy, 0, 1) - t0ms) / 86400000);
+      if (idx >= i0 && idx < i1) ticks.push([idx, String(yy)]);
+    }
+  } else if (n > 120) {                             // months, thinned to ~6
+    const d0 = dayOf(i0), a = d0.getUTCFullYear() * 12 + d0.getUTCMonth();
+    const d1 = dayOf(i1 - 1), b = d1.getUTCFullYear() * 12 + d1.getUTCMonth();
+    const step = Math.max(1, Math.ceil((b - a + 1) / 6));
+    for (let mi = a; mi <= b; mi += step) {
+      const yy = Math.floor(mi / 12), mm = mi % 12;
+      const idx = Math.round((Date.UTC(yy, mm, 1) - t0ms) / 86400000);
+      if (idx >= i0 && idx < i1)
+        ticks.push([idx, mm === 0 ? String(yy) : MON3[mm] + " " + String(yy).slice(2)]);
+    }
+  } else {                                          // days
+    const step = Math.max(1, Math.ceil(n / 6));
+    for (let i = i0; i < i1; i += step) {
+      const d = dayOf(i);
+      ticks.push([i, MON3[d.getUTCMonth()] + " " + d.getUTCDate()]);
+    }
+  }
+  // Last resort: never leave the axis unlabelled.
+  if (!ticks.length) {
+    const d = dayOf(i0), e = dayOf(i1 - 1);
+    ticks.push([i0, MON3[d.getUTCMonth()] + " " + d.getUTCDate() + " " + d.getUTCFullYear()]);
+    if (i1 - 1 > i0) ticks.push([i1 - 1, MON3[e.getUTCMonth()] + " " + e.getUTCDate()]);
+  }
+  g.textAlign = "center"; g.textBaseline = "alphabetic";
+  for (const [idx, label] of ticks) {
+    g.strokeStyle = cssVar("--rule"); g.beginPath();
+    g.moveTo(X(idx), pt); g.lineTo(X(idx), pt + ih); g.stroke();
+    g.fillStyle = cssVar("--ink-3"); g.fillText(label, X(idx), h - 5);
+  }
+
+  // Keep the caption honest about what is actually on screen.
+  const hint = document.getElementById("hyhint");
+  if (hint) {
+    const a = dayOf(i0).toISOString().slice(0, 10), b = dayOf(i1 - 1).toISOString().slice(0, 10);
+    hint.textContent = `Showing ${a} to ${b} (${n.toLocaleString()} days). `
+      + `Scroll to zoom, drag to pan.`;
+  }
+
+  // Decimate to at most ~2 points per pixel; a 45-year daily series is far
+  // denser than the canvas can show and drawing every point is wasted work.
+  const stride = Math.max(1, Math.floor(n/(iw*2)));
+  const plot = (arr, stroke, width, dash) => {
+    g.strokeStyle = stroke; g.lineWidth = width;
+    g.setLineDash(dash||[]); g.beginPath();
+    let pen = false;
+    for (let i=i0;i<i1;i+=stride) {
+      const y = Y(arr[i]);
+      if (y==null) { pen = false; continue; }
+      const x = X(i);
+      pen ? g.lineTo(x,y) : g.moveTo(x,y); pen = true;
+    }
+    g.stroke(); g.setLineDash([]);
+  };
+
+  if (clim) {
+    // Climatology is 366 values indexed by day-of-year, so it must be looked up
+    // by each day's ACTUAL day-of-year.
+    //
+    // The previous version advanced the index by one per day and wrapped with
+    // % 366. That silently drifts, because a common year is 365 days long: the
+    // index gains a day every non-leap year, reaching 32 days of drift by 2022
+    // on a record starting in 1980. The dashed reference was drawn up to a
+    // month out of phase with the two series it exists to be compared against.
+    //
+    // Day-of-year is computed the way pandas computes Series.dt.dayofyear on
+    // the Python side, which is what built this array: 1-based, counting
+    // 29 February in leap years.
+    const doyOf = d => Math.round(
+      (Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+       - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86400000) + 1;
+    const ca = new Array(sim.length);
+    for (let i = i0; i < i1; i += stride) ca[i] = clim[doyOf(dayOf(i)) - 1];
+    plot(ca, cssVar("--ink-3"), 1.4, [4,3]);
+  }
+  plot(sim, cssVar("--accent"), 1.1);
+  plot(obs, cssVar("--ink-2"),  1.1);
+}
+
+function wireHydro() {
+  const c = document.getElementById("hycv"); if (!c) return;
+  c.addEventListener("wheel", e => {
+    e.preventDefault();
+    const r = c.getBoundingClientRect(), pl = 42;
+    const f = Math.max(0, Math.min(1, (e.clientX - r.left - pl) / (r.width - pl - 6)));
+    const n = HY.i1 - HY.i0, k = Math.exp(e.deltaY * 0.0018);
+    const nn = Math.max(60, Math.min(HY.data.sim.length, Math.round(n * k)));
+    let a = Math.round(HY.i0 + (n - nn) * f);
+    a = Math.max(0, Math.min(HY.data.sim.length - nn, a));
+    HY.i0 = a; HY.i1 = a + nn; drawHydro();
+  }, {passive:false});
+  c.addEventListener("pointerdown", e => {
+    HY.drag = {x:e.clientX, i0:HY.i0}; c.classList.add("drag"); c.setPointerCapture(e.pointerId);
+  });
+  c.addEventListener("pointermove", e => {
+    if (!HY.drag) return;
+    const r = c.getBoundingClientRect(), n = HY.i1-HY.i0;
+    const dd = Math.round((e.clientX - HY.drag.x) / (r.width-48) * n);
+    let a = Math.max(0, Math.min(HY.data.sim.length-n, HY.drag.i0 - dd));
+    HY.i0 = a; HY.i1 = a+n; drawHydro();
+  });
+  const up = () => { HY.drag = null; c.classList.remove("drag"); };
+  c.addEventListener("pointerup", up); c.addEventListener("pointercancel", up);
+}
+
+
+// Where this gauge ranks, stated rather than plotted. Ranking is by distance
+// from the metric's optimum, so it reads the same way for "higher is better"
+// metrics (KGE', r), ratios that want 1 (alpha, beta, gamma) and error metrics
+// that want 0 (PBIAS, NRMSE).
+function rankBlock(g) {
+  const m = M[S.metric], v = mval(g);
+  const box = document.createElement("div");
+  box.className = "rank";
+  if (v == null || !isFinite(v)) {
+    box.innerHTML = `<div class="say">No ${m.n} for this gauge.</div>`;
+    return box;
+  }
+  const opt = m.opt != null ? m.opt : 0;
+  const dist = x => Math.abs(x - opt);
+  const others = visible().map(mval).filter(x => x != null && isFinite(x));
+  if (!others.length) return box;
+  const worse = others.filter(x => dist(x) > dist(v)).length;
+  const pct = Math.round(100 * worse / others.length);
+  box.innerHTML = `
+    <div class="say"><b>${fmt(v, m.dec)}</b> &mdash; closer to the ideal than
+      <b>${pct}%</b> of the ${others.length.toLocaleString()} gauges currently shown.</div>
+    <div class="strip"><span class="pin" style="left:${pct}%"></span></div>
+    <div class="ends"><span>worst shown</span><span>best shown</span></div>`;
+  return box;
+}
+
+/* ---- rail ---------------------------------------------------------------- */
+const rail = document.getElementById("rail");
+const MONTHS = ["J","F","M","A","M","J","J","A","S","O","N","D"];
+
+function verdictOf(k) {
+  if (k==null || !isFinite(k)) return null;
+  const dark = RAMP === RAMP_DARK;
+  if (k >= 0.5)       return {t:"Good", c:dark?"#6da7ec":"#256abf"};
+  if (k >= 0)         return {t:"Moderate", c:cssVar("--ink-2")};
+  if (k >= D.noSkill) return {t:"Weak but has skill", c:cssVar("--ink-2")};
+  return {t:"Below no-skill", c:dark?"#f58e85":"#b52f2f"};
+}
+
+function renderSummary() {
+  if (needsMonth()) {
+    rail.innerHTML = `
+      <div class="eyebrow">Current selection</div>
+      <h2>Choose a month</h2>
+      <div class="meta">${M[S.metric].n} is computed within each calendar month.
+        Pick one from the toolbar to draw the map.</div>`;
+    return;
+  }
+  const vis = visible(), m = M[S.metric];
+  const vals = vis.map(mval);
+  const bad = vis.filter(g=>g.kge_2012!=null && g.kge_2012<D.noSkill).length;
+  rail.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+    <div class="eyebrow">Current selection</div>
+    <h2>${vis.length.toLocaleString()} gauges</h2>
+    <div class="meta">Click any gauge to load its time series.</div>
+    <div class="sec">
+      <h3>Median ${monthLabel()}</h3>
+      <div class="hero"><span class="v num">${fmt(median(vals), m.dec)}</span></div>
+      <table class="kv" style="margin-top:12px">
+        <tr><td>Below no-skill (KGE' &lt; ${D.noSkill})</td><td class="num">${bad} · ${(100*bad/Math.max(1,vis.length)).toFixed(0)}%</td></tr>
+        <tr><td>KGE' ≥ 0.50</td><td class="num">${vis.filter(g=>g.kge_2012>=0.5).length}</td></tr>
+        <tr><td>Median paired record</td><td class="num">${fmt(median(vis.map(yearsOf)),0)} yr</td></tr>
+      </table>
+    </div>
+    <div class="sec">
+      <h3>Distribution across gauges</h3>
+      <div id="ec"></div>
+      <div class="chartcap">Share of gauges at or above each value. Dashed line marks the
+        no-skill benchmark.</div>
+    </div>
+    <div class="footnote">
+      Model: ${runLabel()}, daily mean, queried per reach on demand.
+      Observed: daily mean gauge discharge. Metrics use only days where that gauge and
+      the model both have data, so the paired record differs per gauge. Metric window
+      <code>${D.window[0]}</code> to <code>${D.window[1]}</code>; plotted series show the
+      full available record.
+    </div>`;
+  rail.appendChild(wrap);
+  wrap.querySelector("#ec").appendChild(ecdfChart(vals, null));
+}
+
+function renderGauge(g) {
+  // The verdict bands (0.5 / 0 / -0.41) are defined for KGE' and nothing else,
+  // so the pill shows only when KGE' is the metric on display. Rendered under a
+  // Pearson r of -0.67 it claimed "Good" about an entirely different number.
+  const m = M[S.metric];
+  const vd = S.metric === "kge_2012" ? verdictOf(g.kge_2012) : null;
+  rail.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+    <div class="eyebrow">Gauge ${g.g}${g.cc ? " · "+g.cc : ""}</div>
+    <h2>${g.rn || "Reach "+g.id}</h2>
+    <div class="meta">
+      ${g.lat.toFixed(3)}°, ${g.lon.toFixed(3)}° · order ${g.so ?? "—"} ·
+      ${g.da!=null ? sig(g.da)+" km² upstream" : "area —"}<br>
+      ${g.y0}–${g.y1} · ${(g.n_pairs/365.25).toFixed(0)} yr paired${g.kp ? " · "+g.kp : ""}
+    </div>
+
+    <div class="sec">
+      <h3>${monthLabel()}</h3>
+      <div class="hero"><span class="v num">${fmt(mval(g), m.dec)}</span></div>
+      <div id="vd"></div>
+    </div>
+
+    <div class="sec">
+      <h3>All metrics</h3>
+      <table class="kv">
+        <tr><td>KGE' (Kling 2012)</td><td class="num">${fmt(g.kge_2012)}</td></tr>
+        <tr><td>NSE</td><td class="num">${fmt(g.nse)}</td></tr>
+        <tr><td>Pearson r</td><td class="num">${fmt(g.r)}</td></tr>
+        <tr><td>Spearman ρ</td><td class="num">${fmt(g.spearman)}</td></tr>
+        <tr><td>Gamma (CV ratio)</td><td class="num">${fmt(g.gamma)}</td></tr>
+        <tr><td>Alpha (σ ratio)</td><td class="num">${fmt(g.alpha)}</td></tr>
+        <tr><td>Beta (bias ratio)</td><td class="num">${fmt(g.beta)}</td></tr>
+        <tr><td>PBIAS</td><td class="num">${fmt(g.pbias_pct,1)}%</td></tr>
+        <tr><td>Skill vs climatology</td><td class="num">${fmt(g.ss_clim)}</td></tr>
+        <tr><td>NRMSE (÷ mean flow)</td><td class="num">${fmt(g.nrmse)}</td></tr>
+        <tr><td>MAE ÷ mean flow</td><td class="num">${fmt(g.mae_rel)}</td></tr>
+        <tr><td>Mean observed</td><td><span class="num">${sig(g.mean_obs)}</span> m³/s</td></tr>
+        <tr><td>Mean modelled</td><td><span class="num">${sig(g.mean_sim)}</span> m³/s</td></tr>
+        <tr><td>Paired days</td><td class="num">${(g.n_pairs||0).toLocaleString()}</td></tr>
+      </table>
+    </div>
+    <div class="sec">
+      <h3>Why KGE' lands there</h3>
+      <div class="comp" id="comp"></div>
+      <div class="chartcap">Distance from each component's optimum (optimum is 1 for each).
+        The longest bar is the binding constraint.</div>
+    </div>
+
+    <div class="sec">
+      <h3>Rank among shown gauges</h3>
+      <div id="rank"></div>
+    </div>
+
+    ${LIVE ? `    <div class="sec">
+      <div class="sechead">
+        <h3>Daily discharge</h3>
+        <span class="seg">
+          <button id="hlog" aria-pressed="true">Log</button>
+          <button id="hlin" aria-pressed="false">Linear</button>
+        </span>
+      </div>
+      <div class="swatches">
+        <span><i style="background:${cssVar('--ink-2')}"></i>Observed</span>
+        <span><i style="background:${cssVar('--accent')}"></i>Simulated</span>
+        <span><i style="background:${cssVar('--ink-3')}"></i>Climatology</span>
+      </div>
+      <div class="hydro" id="hy"><div class="spin"><span class="b"></span>querying GEOGLOWS…</div></div>
+    </div>` : ""}
+
+    <div class="sec">
+      <h3>Flow duration curve</h3>
+      <div id="fdc"></div>
+      <div class="chartcap">Discharge (m³/s, log) against exceedance probability.
+        Left is flood, right is low flow.</div>
+      <div class="chartcap" id="fdccap"></div>
+    </div>
+
+    <div class="sec">
+      <h3>Mean monthly regime</h3>
+      <div id="mon"></div>
+      <div class="chartcap">Average discharge by calendar month.</div>
+      <div class="chartcap" id="moncap"></div>
+    </div>
+
+    <div class="sec">
+      <h3>Flood detection</h3>
+      <div id="flood"></div>
+      <div class="chartcap">Each series is compared to its OWN 2-year return level
+        (Gumbel, as RFS computes it), so a model that runs low is not penalised for
+        never reaching the gauge's absolute flow. Counts are days, not events: one
+        flood spans several days.</div>
+    </div>
+
+    <div class="sec">
+      <h3>By month</h3>
+      <div id="montbl"></div>
+      <div class="chartcap">Each row pools that calendar month across every year of the
+        paired record, and every metric is recomputed from that month's days alone. The
+        twelve values therefore do not average back to the annual figure. Scrolls sideways.</div>
+    </div>
+
+`;
+  rail.appendChild(wrap);
+
+  if (vd) {
+    const b = document.createElement("span");
+    b.className = "verdict"; b.style.color = vd.c;
+    b.innerHTML = `<span class="dot"></span>${vd.t}`;
+    wrap.querySelector("#vd").appendChild(b);
+  }
+
+  const comp = wrap.querySelector("#comp");
+  [["r",g.r],["γ",g.gamma],["β",g.beta]].forEach(([nm,v]) => {
+    const dev = v==null||!isFinite(v) ? 0 : Math.max(-1, Math.min(1, v-1));
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<span class="nm">${nm}</span>
+      <span class="track"><span class="mid" style="left:50%"></span>
+        <span class="fill" style="${dev>=0?"left:50%":"right:50%"};width:${Math.abs(dev)*50}%;
+          background:${colorFor({dv:0,lo:-1,hi:1}, -Math.abs(dev))}"></span></span>
+      <span class="vv num">${fmt(v)}</span>`;
+    comp.appendChild(row);
+  });
+
+  const fb = wrap.querySelector("#flood");
+  if (fb) fb.appendChild(floodBlock(g));
+  const mt = wrap.querySelector("#montbl");
+  if (mt) mt.appendChild(monthlyTable(g));
+  const rk = wrap.querySelector("#rank");
+  if (rk) rk.appendChild(rankBlock(g));
+  loadSeries(g, wrap);
+}
+
+async function loadSeries(g, wrap) {
+  if (!LIVE) {
+    // Static build: no /api and no daily values, so use the curves computed at
+    // build time. The hydrograph section is not rendered at all in this mode.
+    const c = D.curves && D.curves[String(g.id)];
+    if (c) drawCurves(wrap, c.fo, c.fs, c.mo, c.ms, D.window, null);
+    return;
+  }
+  let d;
+  try {
+    const res = await fetch(`/api/series?id=${g.id}`);
+    d = await res.json();
+    if (d.error) throw new Error(d.error);
+  } catch (err) {
+    wrap.querySelector("#hy").innerHTML =
+      `<div class="err">Could not load the series for reach ${g.id}.<br>${err.message}
+       <br><br>The model query goes out to GEOGLOWS, so this needs network access.</div>`;
+    return;
+  }
+  if (S.sel !== g) return;   // selection changed while the request was in flight
+
+  const t0ms = Date.parse(d.t0 + "T00:00:00Z");
+  HY.data = {sim:d.sim, obs:d.obs, clim:d.clim, doy0:d.doy0, t0ms};
+
+  // Open on the most recent stretch of observed record rather than the whole
+  // series. Eighty-five years of daily values in a 300px panel is an unreadable
+  // mat -- individual events only become visible at a few years' width. Zooming
+  // out to the full record is one scroll away.
+  const DEFAULT_DAYS = 5 * 365;
+  let last = -1;
+  for (let i = d.obs.length - 1; i >= 0; i--) if (d.obs[i] != null) { last = i; break; }
+  if (last < 0) last = d.sim.length - 1;
+  HY.i1 = Math.min(d.sim.length, last + 30);
+  HY.i0 = Math.max(0, HY.i1 - DEFAULT_DAYS);
+
+  wrap.querySelector("#hy").innerHTML =
+    `<canvas id="hycv"></canvas><div class="hint" id="hyhint"></div>`;
+  drawHydro(); wireHydro();
+
+  const hlog = wrap.querySelector("#hlog"), hlin = wrap.querySelector("#hlin");
+  hlog.onclick = () => { HY.log = true;  hlog.setAttribute("aria-pressed","true");
+    hlin.setAttribute("aria-pressed","false"); drawHydro(); };
+  hlin.onclick = () => { HY.log = false; hlin.setAttribute("aria-pressed","true");
+    hlog.setAttribute("aria-pressed","false"); drawHydro(); };
+
+  // Statistics use the metric window only. The hydrograph above still shows the
+  // whole record, but the flow-duration curve and monthly regime must be
+  // computed on the same days the metrics were, or the charts describe a
+  // different sample from the numbers printed beside them.
+  const [w0, w1] = d.win || [0, d.sim.length];
+  const simW = d.sim.slice(w0, w1), obsW = d.obs.slice(w0, w1);
+  const tW = t0ms + w0 * 86400000;
+  const [ps, po] = pairedOnly(simW, obsW);
+  drawCurves(wrap, quantiles(po, FDC_EX), quantiles(ps, FDC_EX),
+             monthlyMeans(obsW.map((v,i)=>simW[i]!=null?v:null), tW),
+             monthlyMeans(simW.map((v,i)=>obsW[i]!=null?v:null), tW),
+             d.window, ps.length);
+}
+
+// Flow-duration and monthly-regime charts. Live mode derives the four arrays
+// from the daily record it just fetched; the static build reads them from the
+// payload, where build_webapp.py precomputed them on the same paired sample.
+function drawCurves(wrap, fo, fs, mo, ms, window, nPaired) {
+  const ex = (D && D.fdcExceed) || FDC_EX;
+  const ticks = [0, Math.floor(ex.length/2), ex.length-1].map(i => ({i, label: ex[i]+"%"}));
+  const fdc = wrap.querySelector("#fdc");
+  if (fdc) fdc.appendChild(lineChart({
+    xs: ex, logY: true, xTicks: ticks, yFmt: sig,
+    series: [{v: fo, c: cssVar("--ink-2")}, {v: fs, c: cssVar("--accent")}]}));
+  const mon = wrap.querySelector("#mon");
+  if (mon) mon.appendChild(lineChart({
+    xs: MONTHS, h: 118, xTicks: MONTHS.map((l,i)=>({i,label:l})), yFmt: sig,
+    series: [{v: mo, c: cssVar("--ink-2")}, {v: ms, c: cssVar("--accent")}]}));
+
+  // Name the sample on both captions. Identical wording over two different
+  // samples is exactly the defect this fix exists to remove.
+  const win = window || (D && D.window) || null;
+  const note = win
+    ? `Paired days only, ${win[0]} to ${win[1]}${nPaired ? ` (${nPaired.toLocaleString()} days)` : ""} — the same sample as the metrics above.`
+    : "Paired days only.";
+  for (const id of ["#fdccap", "#moncap"]) {
+    const e = wrap.querySelector(id);
+    if (e) e.textContent = note;
+  }
+}
+
+// Keep the selected reach in the URL, so a particular gauge can be linked to
+// and a reload lands back on it.
+function syncHash() {
+  const want = S.sel ? "#g=" + S.sel.id : "";
+  if (location.hash !== want) history.replaceState(null, "", location.pathname + want);
+}
+const renderRail = () => {
+  if (!D) return;
+  syncHash();
+  S.sel ? renderGauge(S.sel) : renderSummary();
+};
+
+/* ---- legend -------------------------------------------------------------- */
+function renderLegend() {
+  const m = M[S.metric];
+  const lg = document.querySelector(".legend");
+  if (lg) lg.hidden = needsMonth();   // no scale to show yet
+  if (needsMonth()) return;
+  document.getElementById("lgLab").textContent = monthLabel();
+  const c = document.getElementById("lgbar"), g = c.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  c.width = 220*dpr; c.height = 11*dpr; g.setTransform(dpr,0,0,dpr,0,0);
+  for (let x=0;x<220;x++) { g.fillStyle = m.seq ? interp(SEQ,x/219) : interp(RAMP,x/219);
+    g.fillRect(x,0,1,11); }
+  const f = v => m.log ? sig(v) : String(v);
+  document.getElementById("lgLo").textContent = f(m.lo);
+  document.getElementById("lgMid").textContent = m.seq
+    ? f(m.log ? Math.sqrt(m.lo*m.hi) : (m.lo+m.hi)/2) : String(m.dv);
+  document.getElementById("lgHi").textContent = f(m.hi);
+  const notes = [];
+  if (m.k.startsWith("kge")) notes.push(`no skill at ${D.noSkill}`);
+  if (m.log) notes.push("log scale, 5th–95th percentile");
+  if (m.seq) notes.push("deeper red = larger error");
+  notes.push("beyond the ends is clipped");
+  document.getElementById("lgNote").textContent = notes.join(" · ");
+}
+
+/* ---- interaction --------------------------------------------------------- */
+const tip = document.getElementById("tip");
+let drag = null;
+
+cv.addEventListener("pointerdown", e => {
+  drag = {x:e.clientX,y:e.clientY,tx:view.tx,ty:view.ty,moved:false};
+  cv.classList.add("drag"); cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", e => {
+  const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
+  if (drag) {
+    const dx = e.clientX-drag.x, dy = e.clientY-drag.y;
+    if (Math.abs(dx)+Math.abs(dy) > 3) drag.moved = true;
+    view.tx = drag.tx+dx; view.ty = drag.ty+dy; draw(); return;
+  }
+  const g = needsMonth() ? null : nearest(mx,my);
+  if (g !== S.hover) { S.hover = g; draw(); }
+  if (g) {
+    tip.textContent = `${g.g} · ${fmt(mval(g), M[S.metric].dec)}`;
+    tip.style.left = (mx+14)+"px"; tip.style.top = (my+14)+"px"; tip.classList.add("on");
+  } else tip.classList.remove("on");
+});
+cv.addEventListener("pointerup", e => {
+  if (drag && !drag.moved) {
+    const r = cv.getBoundingClientRect();
+    const g = nearest(e.clientX-r.left, e.clientY-r.top);
+    S.sel = (g && g === S.sel) ? null : g;
+    renderRail();
+  }
+  drag = null; cv.classList.remove("drag"); draw();
+});
+cv.addEventListener("pointercancel", () => { drag=null; cv.classList.remove("drag"); });
+cv.addEventListener("pointerleave", () => { tip.classList.remove("on");
+  if (S.hover) { S.hover=null; draw(); } });
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
+  const ns = Math.max(1, Math.min(40, view.s*Math.exp(-e.deltaY*0.0016))), f = ns/view.s;
+  view.tx = mx-(mx-view.tx)*f; view.ty = my-(my-view.ty)*f; view.s = ns; draw();
+}, {passive:false});
+
+function zoomBy(k) {
+  const ns = Math.max(1, Math.min(40, view.s*k)), f = ns/view.s;
+  view.tx = W/2-(W/2-view.tx)*f; view.ty = H/2-(H/2-view.ty)*f; view.s = ns; draw();
+}
+document.getElementById("zin").onclick  = () => zoomBy(1.45);
+document.getElementById("zout").onclick = () => zoomBy(1/1.45);
+document.getElementById("zfit").onclick = () => { view.s=1; view.tx=0; view.ty=0; draw(); };
+
+
+
+
+// Metrics available per calendar month. Everything else is whole-series only.
+const MONTHLY = [
+  { k: "kge_2012",  n: "KGE'",              scale: "kge_2012",  dec: 2 },
+  { k: "ss_clim",   n: "Skill vs climatology", scale: "ss_clim", dec: 2 },
+  { k: "nse",       n: "NSE",               scale: "nse",       dec: 2 },
+  { k: "r",         n: "Pearson r",         scale: "r",         dec: 2 },
+  { k: "spearman",  n: "Spearman \u03c1",   scale: "spearman",  dec: 2 },
+  { k: "gamma",     n: "Gamma (CV ratio)",  scale: "gamma",     dec: 2 },
+  { k: "alpha",     n: "Alpha (\u03c3 ratio)", scale: "alpha",  dec: 2 },
+  { k: "beta",      n: "Beta (bias ratio)", scale: "beta",      dec: 2 },
+  { k: "pbias_pct", n: "PBIAS (%)",         scale: "pbias_pct", dec: 1 },
+  { k: "nrmse",     n: "NRMSE (\u00f7 mean flow)", scale: "nrmse", dec: 2 },
+  { k: "mae_rel",   n: "MAE \u00f7 mean flow", scale: "mae_rel", dec: 2 },
+];
+// Monthly values arrive as one 12-element array per metric, indexed 0 =
+// January, rather than 240 separate keys. Every read goes through here so
+// the payload shape is defined in exactly one place.
+const monthVal = (g, k, monthIndex) => {
+  const a = g[k + "_m"];
+  return Array.isArray(a) ? a[monthIndex] : undefined;
+};
+const MM = i => String(i).padStart(2, "0");
+
+// Per-gauge monthly table: every metric that exists per calendar month.
+// Wide, so it scrolls horizontally inside .tblwrap rather than squeezing.
+function monthlyTable(g) {
+  const box = document.createElement("div");
+  box.className = "tblwrap";
+  const cols = MONTHLY;
+  const head = `<tr><th>Month</th><th>days</th>${cols.map(c =>
+      `<th>${c.n.replace(" (bias ratio)","").replace(" (CV ratio)","")
+             .replace(" (\u03c3 ratio)"," \u03c3").replace(" vs climatology"," vs clim")
+             .replace(" (\u00f7 mean flow)"," \u00f7 mean")}</th>`).join("")}</tr>`;
+  const body = MONTH_NAMES.map((nm, i) => {
+    const n = monthVal(g, "n", i);
+    return `<tr><td>${nm.slice(0,3)}</td>`
+      + `<td class="num">${n != null ? n.toLocaleString() : "\u2014"}</td>`
+      + cols.map(c => {
+          const v = monthVal(g, c.k, i);
+          const sw = v != null ? `<span class="swatch" style="background:${colorFor(M[c.scale], v)}"></span>` : "";
+          return `<td class="num">${sw}${fmt(v, c.dec)}</td>`;
+        }).join("") + `</tr>`;
+  }).join("");
+  box.innerHTML = `<table class="grid"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  return box;
+}
+
+// Flood-detection block, drawn as the 2x2 contingency table the scores come
+// from. The four counts are the actual quantity measured; POD/FAR/CSI/ETS are
+// each one ratio of them, so showing the table first makes the scores readable
+// rather than asking the reader to take four numbers on trust.
+function floodBlock(g) {
+  const box = document.createElement("div");
+  if (g.pod == null) {
+    box.innerHTML = `<div class="empty">No flood-detection scores for this gauge
+      (fewer than 10 annual maxima, or no positive flood level).</div>`;
+    return box;
+  }
+  const a = g.hits ?? 0, b = g.false_alarms ?? 0, c = g.misses ?? 0, d = g.correct_neg ?? 0;
+  const N = (v) => v.toLocaleString();
+  box.innerHTML = `
+    <table class="ctab">
+      <tr>
+        <th class="side"></th>
+        <th colspan="2">Gauge above its 2-yr level</th>
+      </tr>
+      <tr>
+        <th class="side"></th><th>yes</th><th>no</th>
+      </tr>
+      <tr>
+        <th class="side"><span class="axis">Model yes</span></th>
+        <td class="hit"><span class="cnt num">${N(a)}</span><span class="lab">hits</span></td>
+        <td><span class="cnt num">${N(b)}</span><span class="lab">false alarms</span></td>
+      </tr>
+      <tr>
+        <th class="side"><span class="axis">Model no</span></th>
+        <td><span class="cnt num">${N(c)}</span><span class="lab">misses</span></td>
+        <td class="miss"><span class="cnt num">${N(d)}</span><span class="lab">correct negatives</span></td>
+      </tr>
+    </table>
+
+    <table class="kv" style="margin-top:14px">
+      <tr><td>POD &mdash; hits &divide; (hits + misses)</td><td class="num">${fmt(g.pod)}</td></tr>
+      <tr><td>FAR &mdash; false alarms &divide; (hits + false alarms)</td><td class="num">${fmt(g.far)}</td></tr>
+      <tr><td>CSI &mdash; hits &divide; (all but correct negatives)</td><td class="num">${fmt(g.csi)}</td></tr>
+      <tr><td>ETS &mdash; CSI less hits expected by chance</td><td class="num">${fmt(g.ets)}</td></tr>
+      <tr><td>Frequency bias &mdash; days flagged, model &divide; gauge</td><td class="num">${fmt(g.freq_bias)}</td></tr>
+      <tr><td>2-yr level, observed</td><td><span class="num">${sig(g.t2_obs)}</span> m\u00b3/s</td></tr>
+      <tr><td>2-yr level, modelled</td><td><span class="num">${sig(g.t2_sim)}</span> m\u00b3/s</td></tr>
+      <tr><td>Annual maxima used</td><td class="num">${N(g.n_years_ams ?? 0)}</td></tr>
+    </table>`;
+  return box;
+}
+
+/* ---- summary tab --------------------------------------------------------- */
+// Groupings are the ones asked for: overall, stream order, Koppen group, and
+// month. Everything is aggregated here in the browser from the same payload the
+// map uses, so no extra fields and no round trip.
+//
+// Bars are coloured by their own value on the same scale as the map, rather than
+// by a categorical season/group palette. Two reasons: the group is already named
+// on the axis so a second encoding of it would be redundant, and it keeps one
+// visual language across the whole page.
+const GROUPINGS = [
+  { k: "overall", n: "Overall" },
+  { k: "so",      n: "Stream order" },
+  { k: "kp",      n: "Köppen group" },
+  { k: "month",   n: "Month" },
+];
+// Month is the one grouping that is cyclical, which is the one case a polar
+// layout genuinely earns: December sits next to January, as it should.
+const SUM = { group: "so", metric: "kge_2012", monthMetric: "kge_2012" };
+
+const pctl = (v, p) => v.length ? v[Math.min(v.length - 1, Math.round(p * (v.length - 1)))] : null;
+function statsFor(vals) {
+  const v = vals.filter(x => x != null && isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  return { n: v.length, p05: pctl(v, .05), p25: pctl(v, .25), med: pctl(v, .5),
+           p75: pctl(v, .75), p95: pctl(v, .95) };
+}
+
+// Rows for the current grouping: {label, sub, stats, value}
+function summaryRows() {
+  const gs = D.gauges;
+  if (SUM.group === "month") {
+    const mo = MONTHLY.find(x => x.k === SUM.monthMetric) || MONTHLY[0];
+    return MONTH_NAMES.map((nm, i) => ({
+      label: nm.slice(0, 3), full: nm,
+      stats: statsFor(gs.map(g => monthVal(g, mo.k, i))),
+    }));
+  }
+  if (SUM.group === "overall") {
+    return [{ label: "All gauges", stats: statsFor(gs.map(g => g[SUM.metric])) }];
+  }
+  const key = SUM.group;                       // "so" or "kp"
+  const buckets = new Map();
+  for (const g of gs) {
+    const v = g[key];
+    if (v == null || v === "None" || v === "nan") continue;
+    if (!buckets.has(v)) buckets.set(v, []);
+    buckets.get(v).push(g[SUM.metric]);
+  }
+  const keys = [...buckets.keys()].sort((a, b) =>
+    typeof a === "number" ? a - b : String(a).localeCompare(String(b)));
+  return keys.map(k => ({
+    label: key === "so" ? "Order " + k : String(k),
+    stats: statsFor(buckets.get(k)),
+  })).filter(r => r.stats);
+}
+
+// The month grouping can only show r, because r is the only metric computed
+// per calendar month.
+// For the month grouping the colour scale and number format come from whichever
+// monthly metric is selected; otherwise from the whole-series metric picker.
+const sumMetric = () => {
+  if (SUM.group !== "month") return M[SUM.metric];
+  const mo = MONTHLY.find(x => x.k === SUM.monthMetric) || MONTHLY[0];
+  return M[mo.scale];
+};
+
+function barChart(rows, m) {
+  const w = 760, rowH = 30, pl = 104, pr = 112, pt = 20, pb = 4;
+  const h = pt + rows.length * rowH + pb;
+  const svg = el("svg", { class: "chart", viewBox: `0 0 ${w} ${h}`, role: "img" });
+  const iw = w - pl - pr;
+  const X = v => pl + Math.max(0, Math.min(1, scalePos(m, v))) * iw;
+
+  // axis
+  [m.lo, m.dv != null ? m.dv : (m.lo + m.hi) / 2, m.hi].forEach(v => {
+    if (v == null) return;
+    const x = X(v);
+    svg.appendChild(el("line", { x1: x, x2: x, y1: pt - 6, y2: h - pb,
+      stroke: cssVar("--rule"), "stroke-width": 1 }));
+    const t = el("text", { x, y: pt - 10, "text-anchor": "middle", "font-size": 9,
+      fill: cssVar("--ink-3"), "font-family": "IBM Plex Mono, monospace" });
+    t.textContent = m.log ? sig(v) : String(v); svg.appendChild(t);
+  });
+  if (m.k && m.k.startsWith("kge")) {
+    const x = X(D.noSkill);
+    svg.appendChild(el("line", { x1: x, x2: x, y1: pt - 6, y2: h - pb,
+      stroke: cssVar("--ink-3"), "stroke-width": 1, "stroke-dasharray": "3 3" }));
+  }
+
+  rows.forEach((r, i) => {
+    const y = pt + i * rowH, cy = y + rowH / 2;
+    const lab = el("text", { x: pl - 12, y: cy + 4, "text-anchor": "end", "font-size": 12,
+      fill: cssVar("--ink-2") });
+    lab.textContent = r.label; svg.appendChild(lab);
+
+    // interquartile whisker behind the median mark
+    const x25 = X(r.stats.p25), x75 = X(r.stats.p75);
+    svg.appendChild(el("line", { x1: x25, x2: x75, y1: cy, y2: cy,
+      stroke: cssVar("--rule-2"), "stroke-width": 7, "stroke-linecap": "round" }));
+
+    const base = X(m.dv != null ? m.dv : m.lo), xm = X(r.stats.med);
+    svg.appendChild(el("rect", {
+      x: Math.min(base, xm), y: cy - 5.5, width: Math.max(2, Math.abs(xm - base)), height: 11,
+      rx: 3, fill: colorFor(m, r.stats.med),
+      stroke: cssVar("--panel"), "stroke-width": 1 }));
+
+    const val = el("text", { x: w - pr + 10, y: cy + 4, "font-size": 12, "font-weight": 500,
+      fill: cssVar("--ink"), "font-family": "IBM Plex Mono, monospace" });
+    val.textContent = fmt(r.stats.med, m.dec); svg.appendChild(val);
+    const nn = el("text", { x: w - 4, y: cy + 4, "text-anchor": "end", "font-size": 10,
+      fill: cssVar("--ink-3"), "font-family": "IBM Plex Mono, monospace" });
+    nn.textContent = "n " + r.stats.n.toLocaleString(); svg.appendChild(nn);
+  });
+  return svg;
+}
+
+function polarChart(rows, m) {
+  const size = 400, cx = size / 2, cy = size / 2, r0 = 34, r1 = 150;
+  const svg = el("svg", { class: "chart", viewBox: `0 0 ${size} ${size}`,
+                          preserveAspectRatio: "xMidYMid meet", role: "img" });
+  // The radial axis spans the DATA, not the metric's theoretical range. On the
+  // metric scale (-1..1) a spread of 0.32-0.53 lands every wedge at almost the
+  // same radius, which hides the very contrast the chart exists to show. Colour
+  // still uses the absolute metric scale, so it stays comparable with the map.
+  const vals = rows.filter(r => r.stats).map(r => r.stats.med);
+  let rlo = Math.min(0, ...vals), rhi = Math.max(...vals);
+  if (!(rhi > rlo)) rhi = rlo + 1;
+  rhi += (rhi - rlo) * 0.10;
+  const R = v => r0 + Math.max(0, Math.min(1, (v - rlo) / (rhi - rlo))) * (r1 - r0);
+  const pt = (ang, rad) => [cx + rad * Math.sin(ang), cy - rad * Math.cos(ang)];
+
+  for (const frac of [0.25, 0.5, 0.75, 1]) {
+    svg.appendChild(el("circle", { cx, cy, r: r0 + frac * (r1 - r0), fill: "none",
+      stroke: cssVar("--rule"), "stroke-width": 1 }));
+  }
+  // Ring labels are drawn last, over the wedges, with a surface-coloured halo --
+  // otherwise a wedge that happens to reach the top of the chart buries them.
+  const ringLabels = [];
+  for (const frac of [0.5, 1]) {
+    const t = el("text", { x: cx + 5, y: cy - (r0 + frac * (r1 - r0)) - 3, "font-size": 9,
+      fill: cssVar("--ink-3"), "font-family": "IBM Plex Mono, monospace",
+      stroke: cssVar("--panel"), "stroke-width": 3, "paint-order": "stroke fill" });
+    t.textContent = fmt(rlo + frac * (rhi - rlo), 2); ringLabels.push(t);
+  }
+  const step = 2 * Math.PI / rows.length, gap = step * 0.14;
+
+  rows.forEach((row, i) => {
+    const a0 = i * step - step / 2 + gap / 2, a1 = a0 + step - gap;
+    const mid = (a0 + a1) / 2;
+    if (row.stats) {
+      const rad = R(row.stats.med);
+      const [x0, y0] = pt(a0, r0), [x1, y1] = pt(a0, rad);
+      const [x2, y2] = pt(a1, rad), [x3, y3] = pt(a1, r0);
+      svg.appendChild(el("path", {
+        d: `M${x0} ${y0} L${x1} ${y1} A${rad} ${rad} 0 0 1 ${x2} ${y2} L${x3} ${y3} `
+         + `A${r0} ${r0} 0 0 0 ${x0} ${y0} Z`,
+        fill: colorFor(m, row.stats.med), stroke: cssVar("--panel"), "stroke-width": 1 }));
+      const [lx, ly] = pt(mid, rad + 13);
+      const t = el("text", { x: lx, y: ly + 3.5, "text-anchor": "middle", "font-size": 10,
+        fill: cssVar("--ink-2"), "font-family": "IBM Plex Mono, monospace" });
+      t.textContent = fmt(row.stats.med, 2); svg.appendChild(t);
+    }
+    const [mx, my] = pt(mid, r1 + 34);
+    const ml = el("text", { x: mx, y: my + 4, "text-anchor": "middle", "font-size": 11,
+      "font-weight": 500, fill: cssVar("--ink-2") });
+    ml.textContent = row.label; svg.appendChild(ml);
+  });
+  ringLabels.forEach(t => svg.appendChild(t));
+  return svg;
+}
+
+function renderSummaryTab() {
+  const host = document.getElementById("summary");
+  const gs = D.gauges, kge = gs.map(g => g.kge_2012);
+  const withSkill = kge.filter(v => v != null && v >= D.noSkill).length;
+  const beatClim = gs.filter(g => g.ss_clim != null && g.ss_clim > 0).length;
+  const nClim = gs.filter(g => g.ss_clim != null).length;
+  const rows = summaryRows(), m = sumMetric();
+  const grp = GROUPINGS.find(g => g.k === SUM.group);
+
+  host.innerHTML = `
+    <div class="wrap">
+      <div>
+        <h2>VPU ${D.vpu} — overall performance</h2>
+        <p class="lede">${runLabel()} against ${gs.length.toLocaleString()}
+          observed gauges, daily mean on both sides. Every gauge is scored only on days
+          where it and the model both have data.</p>
+      </div>
+
+      <section>
+        <h3>Headline</h3>
+        <div class="tiles">
+          <div class="tile"><span class="k">Gauges</span>
+            <span class="v num">${gs.length.toLocaleString()}</span>
+            <span class="sub">median ${fmt(median(gs.map(yearsOf)), 0)} yr of paired record</span></div>
+          <div class="tile"><span class="k">Median KGE'</span>
+            <span class="v num">${fmt(median(kge))}</span>
+            <span class="sub">no-skill line at ${D.noSkill}</span></div>
+          <div class="tile"><span class="k">Have skill</span>
+            <span class="v num">${(100 * withSkill / gs.length).toFixed(0)}%</span>
+            <span class="sub">${withSkill.toLocaleString()} gauges above ${D.noSkill}</span></div>
+          <div class="tile"><span class="k">Beat climatology</span>
+            <span class="v num">${nClim ? (100 * beatClim / nClim).toFixed(0) : "—"}%</span>
+            <span class="sub">vs the gauge's own seasonal cycle</span></div>
+          <div class="tile"><span class="k">Median r</span>
+            <span class="v num">${fmt(median(gs.map(g => g.r)))}</span>
+            <span class="sub">&#947; ${fmt(median(gs.map(g => g.gamma)))} &#183;
+              &#946; ${fmt(median(gs.map(g => g.beta)))}</span></div>
+        </div>
+      </section>
+
+      <section>
+        <h3>By grouping</h3>
+        <div class="sumctl">
+          <div class="ctl"><label for="sumGroup">Group by</label>
+            <select id="sumGroup"></select></div>
+          <div class="ctl" id="sumMetricCtl"><label for="sumMetric">Metric</label>
+            <select id="sumMetric"></select></div>
+        </div>
+        <div id="sumChart"></div>
+        <div class="chartcap" id="sumCap"></div>
+        <div class="tblwrap" style="margin-top:16px">
+          <table class="grid"><thead><tr>
+            <th>${grp.n === "Overall" ? "Group" : grp.n}</th><th>n</th>
+            <th>p05</th><th>p25</th><th>median</th><th>p75</th><th>p95</th>
+          </tr></thead><tbody id="sumRows"></tbody></table>
+        </div>
+      </section>
+
+      <section>
+        <h3>All metrics, all gauges</h3>
+        <div class="tblwrap">
+          <table class="grid"><thead><tr>
+            <th>Metric</th><th>n</th><th>p05</th><th>p25</th><th>median</th><th>p75</th><th>p95</th>
+          </tr></thead><tbody id="allRows"></tbody></table>
+        </div>
+        <div class="chartcap">Percentiles are across gauges, not across days. Medians are
+          reported rather than means because KGE', NSE and the ratios are unbounded below,
+          so a handful of bad gauges would dominate any mean.</div>
+      </section>
+    </div>`;
+
+  // controls
+  const gSel = host.querySelector("#sumGroup");
+  GROUPINGS.forEach(g => { const o = document.createElement("option");
+    o.value = g.k; o.textContent = g.n; gSel.appendChild(o); });
+  gSel.value = SUM.group;
+  gSel.onchange = () => { SUM.group = gSel.value; renderSummaryTab(); };
+
+  const mSel = host.querySelector("#sumMetric");
+  METRICS.filter(x => !x.monthly).forEach(x => { const o = document.createElement("option");
+    o.value = x.k; o.textContent = x.n; mSel.appendChild(o); });
+  mSel.value = SUM.metric;
+  mSel.onchange = () => { SUM.metric = mSel.value; renderSummaryTab(); };
+
+  // Only three metrics exist per calendar month, so the month grouping gets its
+  // own shorter list rather than the full whole-series one.
+  if (SUM.group === "month") {
+    mSel.innerHTML = "";
+    MONTHLY.forEach(x => { const o = document.createElement("option");
+      o.value = x.k; o.textContent = x.n; mSel.appendChild(o); });
+    mSel.value = SUM.monthMetric;
+    mSel.onchange = () => { SUM.monthMetric = mSel.value; renderSummaryTab(); };
+  }
+
+  const chartHost = host.querySelector("#sumChart");
+  if (SUM.group === "month") {
+    // A square chart should not stretch to the width of a wide window.
+    const box = document.createElement("div");
+    box.style.maxWidth = "440px";
+    box.appendChild(polarChart(rows, m));
+    chartHost.appendChild(box);
+  } else {
+    chartHost.appendChild(barChart(rows, m));
+  }
+  host.querySelector("#sumCap").textContent = SUM.group === "month"
+    ? `Median ${m.n} within each calendar month, pooled across years. The radial axis spans `
+      + `the data, not the metric's full range, so the differences are visible; ring labels give `
+      + `the scale.`
+    : `Median ${m.n} per group. The pale bar behind each median spans the 25th to 75th `
+      + `percentile, so a wide bar means the gauges in that group disagree.`;
+
+  const tb = host.querySelector("#sumRows");
+  rows.forEach(r => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><span class="swatch" style="background:${colorFor(m, r.stats.med)}"></span>${r.full || r.label}</td>`
+      + [r.stats.n.toLocaleString(), fmt(r.stats.p05, m.dec), fmt(r.stats.p25, m.dec),
+         fmt(r.stats.med, m.dec), fmt(r.stats.p75, m.dec), fmt(r.stats.p95, m.dec)]
+        .map(v => `<td class="num">${v}</td>`).join("");
+    tb.appendChild(tr);
+  });
+
+  const ab = host.querySelector("#allRows");
+  METRICS.filter(x => !x.monthly).forEach(x => {
+    const st = statsFor(gs.map(g => g[x.k]));
+    if (!st) return;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${x.n}</td>`
+      + [st.n.toLocaleString(), fmt(st.p05, x.dec), fmt(st.p25, x.dec), fmt(st.med, x.dec),
+         fmt(st.p75, x.dec), fmt(st.p95, x.dec)].map(v => `<td class="num">${v}</td>`).join("");
+    ab.appendChild(tr);
+  });
+}
+
+function showTab(which) {
+  const isMap = which === "map";
+  // Colour-by, month, record length, stream-order chips and the reset link all
+  // act on the map only, so they would be dead controls on the summary tab.
+  for (const id of ["metricCtl", "yrCtl", "orderCtl", "filtCtl"]) {
+    const e = document.getElementById(id);
+    if (e) e.hidden = !isMap;
+  }
+  document.querySelector(".split").hidden = !isMap;
+  document.getElementById("summary").hidden = isMap;
+  document.getElementById("tabMap").setAttribute("aria-pressed", String(isMap));
+  document.getElementById("tabSum").setAttribute("aria-pressed", String(!isMap));
+  // The map canvas has no size while hidden, so it must be re-measured on return.
+  if (isMap) { fit(); draw(); drawHydro(); } else { renderSummaryTab(); }
+}
+
+/* ---- resizable rail ------------------------------------------------------ */
+// Width lives in a CSS variable and is remembered per browser. Wrapped in
+// try/catch because localStorage throws outright in some embedding contexts.
+const RAIL_MIN = 300, RAIL_MAX_FRAC = 0.72, RAIL_KEY = "gse.railWidth";
+
+function setRailWidth(w, persist) {
+  const max = Math.max(RAIL_MIN, Math.round(window.innerWidth * RAIL_MAX_FRAC));
+  w = Math.max(RAIL_MIN, Math.min(max, Math.round(w)));
+  document.documentElement.style.setProperty("--rail-w", w + "px");
+  if (persist) { try { localStorage.setItem(RAIL_KEY, String(w)); } catch (e) {} }
+  fit(); draw(); drawHydro();
+  return w;
+}
+
+(function initRail() {
+  let saved = null;
+  try { saved = localStorage.getItem(RAIL_KEY); } catch (e) {}
+  if (saved && isFinite(+saved)) setRailWidth(+saved, false);
+
+  const gut = document.getElementById("gutter");
+  if (!gut) return;
+  let dragging = false;
+
+  gut.addEventListener("pointerdown", e => {
+    dragging = true; gut.classList.add("dragging");
+    document.body.classList.add("resizing");
+    gut.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  gut.addEventListener("pointermove", e => {
+    if (dragging) setRailWidth(window.innerWidth - e.clientX, false);
+  });
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false; gut.classList.remove("dragging");
+    document.body.classList.remove("resizing");
+    const cur = parseInt(getComputedStyle(document.documentElement)
+      .getPropertyValue("--rail-w"), 10);
+    if (isFinite(cur)) setRailWidth(cur, true);
+  };
+  gut.addEventListener("pointerup", stop);
+  gut.addEventListener("pointercancel", stop);
+
+  // Keyboard-accessible: the handle is focusable, arrows nudge it.
+  gut.addEventListener("keydown", e => {
+    const step = e.shiftKey ? 48 : 16;
+    const cur = parseInt(getComputedStyle(document.documentElement)
+      .getPropertyValue("--rail-w"), 10) || 384;
+    if (e.key === "ArrowLeft")  { setRailWidth(cur + step, true); e.preventDefault(); }
+    if (e.key === "ArrowRight") { setRailWidth(cur - step, true); e.preventDefault(); }
+  });
+  // Double-click restores the default.
+  gut.addEventListener("dblclick", () => setRailWidth(384, true));
+})();
+
+/* ---- boot ---------------------------------------------------------------- */
+async function boot() {
+  syncRamp();
+  if (EMBEDDED) {
+    D = EMBEDDED;
+  } else {
+    try {
+      D = await (await fetch("/api/gauges")).json();
+    } catch (err) {
+      document.getElementById("rail").innerHTML =
+        `<div class="err">Could not reach the local API. Start it with
+         <code>python serve.py</code> and open the address it prints.</div>`;
+      return;
+    }
+  }
+
+  const pctl = (a,p) => { const v = a.filter(x=>x!=null&&isFinite(x)&&x>0).sort((x,y)=>x-y);
+    return v.length ? v[Math.min(v.length-1, Math.floor(p*(v.length-1)))] : null; };
+  for (const m of METRICS) if (m.log) {
+    m.lo = pctl(D.gauges.map(g=>g[m.k]), 0.05) ?? 0.01;
+    m.hi = pctl(D.gauges.map(g=>g[m.k]), 0.95) ?? 100;
+  }
+
+  [BX0, BY0, BX1, BY1] = D.bbox;
+  KX = Math.cos((BY0+BY1)/2 * Math.PI/180);
+  ORDERS = [...new Set(D.gauges.map(g=>g.so).filter(v=>v!=null))].sort((a,b)=>a-b);
+  S.orders = new Set(ORDERS);
+
+  document.getElementById("brandsub").textContent =
+    `VPU ${D.vpu} · ${D.gauges.length.toLocaleString()} gauges · ${rawLabel()}`;
+  // Put the run name in the browser tab too. Comparing two runs means two tabs,
+  // and both would otherwise read "Gauge Skill Explorer".
+  document.title = `${rawLabel()} — VPU ${D.vpu} — Gauge Skill Explorer`;
+
+  const sel = document.getElementById("metric");
+  METRICS.forEach(m => { const o = document.createElement("option");
+    o.value = m.k; o.textContent = m.n; sel.appendChild(o); });
+  sel.value = S.metric;
+  sel.onchange = () => { S.metric = sel.value; renderLegend(); draw(); renderRail(); };
+
+  const ordersEl = document.getElementById("orders");
+  ORDERS.forEach(o => {
+    const b = document.createElement("button");
+    b.className = "chip"; b.textContent = o; b.setAttribute("aria-pressed","true");
+    b.onclick = () => {
+      S.orders.has(o) ? S.orders.delete(o) : S.orders.add(o);
+      if (!S.orders.size) S.orders.add(o);
+      b.setAttribute("aria-pressed", String(S.orders.has(o)));
+      if (S.sel && !S.orders.has(S.sel.so)) S.sel = null;
+      draw(); renderRail();
+    };
+    ordersEl.appendChild(b);
+  });
+
+  const yr = document.getElementById("minyr"), yrOut = document.getElementById("minyrOut");
+  yr.oninput = () => { S.minYears = +yr.value; yrOut.textContent = yr.value+" yr";
+    if (S.sel && yearsOf(S.sel) < S.minYears) S.sel = null; draw(); renderRail(); };
+
+  const bad = document.getElementById("onlyBad");
+  bad.onclick = () => { S.onlyBad = !S.onlyBad; bad.setAttribute("aria-pressed", String(S.onlyBad));
+    if (S.sel && S.onlyBad && !(S.sel.kge_2012 < D.noSkill)) S.sel = null;
+    draw(); renderRail(); };
+
+  document.getElementById("reset").onclick = () => {
+    S.minYears = 0; yr.value = 0; yrOut.textContent = "0 yr";
+    S.onlyBad = false; bad.setAttribute("aria-pressed","false");
+    S.orders = new Set(ORDERS);
+    [...ordersEl.children].forEach(b => b.setAttribute("aria-pressed","true"));
+    S.sel = null; view.s = 1; view.tx = 0; view.ty = 0;
+    draw(); renderRail();
+  };
+
+  const want = /^#g=(\d+)$/.exec(location.hash || "");
+  if (want) S.sel = D.gauges.find(g => g.id === +want[1]) || null;
+
+  document.getElementById("tabMap").onclick = () => showTab("map");
+  document.getElementById("tabSum").onclick = () => showTab("summary");
+
+  fit(); renderLegend(); draw(); renderRail();
+}
+
+window.addEventListener("resize", () => { fit(); draw(); drawHydro(); });
+if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)")
+  .addEventListener?.("change", () => { syncRamp(); renderLegend(); draw(); renderRail(); });
+new MutationObserver(() => { syncRamp(); renderLegend(); draw(); renderRail(); })
+  .observe(document.documentElement, {attributes:true, attributeFilter:["data-theme"]});
+if (document.fonts?.ready) document.fonts.ready.then(() => { fit(); draw(); drawHydro(); });
+
+boot();
+})();
+</script>

@@ -1,0 +1,54 @@
+# Conda environment for the GEOGLOWS RFS retrospective evaluation.
+#
+#   conda env create -f environment.yml
+#   conda activate geoglows-eval
+#   python kge_map.py
+#
+# Everything comes from conda-forge; cartopy in particular is painful via pip
+# because it needs GEOS and PROJ as system libraries.
+#
+# NOTE on ~/.local: this machine has cartopy installed in
+# ~/.local/lib/python3.12/site-packages, which leaks into *every* Python 3.12
+# environment. That is why `base` appears to work even though cartopy is not
+# installed in it. If an import ever resolves to a version you did not expect,
+# run with `PYTHONNOUSERSITE=1` to confirm the environment is self-sufficient:
+#
+#   PYTHONNOUSERSITE=1 python kge_map.py
+#
+name: geoglows-eval
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+
+  # core
+  - numpy>=1.26
+  - pandas>=2.2
+  - scipy>=1.11
+
+  # zarr access over plain HTTP.
+  # zarr is pinned below 3.0 on purpose: the 3.x rewrite changed the store API,
+  # and this code uses the v2 pattern `zarr.open(fsspec.get_mapper(url))`.
+  - zarr>=2.16,<3
+  - fsspec>=2024.2
+  - aiohttp        # fsspec's HTTP filesystem backend
+  - requests
+
+  # serve.py queries the retrospective per reach through this package.
+  # kge_map.py does not need it -- that one reads the zarr directly.
+  - geoglows>=2.2
+
+  # file formats
+  - pyarrow>=15     # parquet (metrics table, GEOGLOWS model table)
+  - openpyxl        # pd.read_excel for master_catalog_with_metadata.xlsx
+
+  # plotting / mapping
+  - matplotlib-base>=3.8
+  - cartopy>=0.22   # pulls in GEOS + PROJ
+
+  # optional, useful as this grows
+  - geopandas
+  - xarray
+  - dask

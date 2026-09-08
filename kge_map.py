@@ -1,0 +1,1413 @@
+#!/usr/bin/env python
+"""Score modelled daily discharge against observed gauges, for one VPU.
+
+WHAT THIS SCRIPT IS
+-------------------
+This reads modelled daily mean discharge, pairs it against local observed gauge
+CSVs, and writes the files listed under OUTPUTS WRITTEN below. These outputs can 
+be read by serve.py and build_webapp.py to produce a web page with a map of the results.
+This is designed to be a pipeline for evaluating a model's output. You may run this several times
+with different model outputs, and the outputs will be written to different directories with 
+different labels. The web page will then show the results for each model output.
+
+The model discharge comes from the GEOGLOWS retrospective daily zarr on S3 by
+default, or from a parquet file given with --model-parquet. Sub-daily input is
+averaged to daily mean. Either way the array is cached locally and reused, so
+only the first run pays for reading it.
+
+
+USAGE
+-----
+    python kge_map.py --vpu <VPU>                 whole model record
+    python kge_map.py --vpu <VPU> --start 1990-01-01 --end 2020-12-31
+    python kge_map.py --vpu <VPU> --min-years 5
+    python kge_map.py --vpu <VPU> --refresh       re-read the zarr, ignore the cache
+    python kge_map.py --vpu <VPU> --label "routing v7" --outdir outputs_v7
+    python kge_map.py --vpu <VPU> --warmup-years 1
+    python kge_map.py --vpu <VPU> --model-parquet routed.parquet --label "routing v7"
+
+    --vpu         VPU code to evaluate. Defaults to 714
+    --model-parquet
+                  Score a parquet of modelled discharge instead of the
+                  retrospective. Layout: a datetime index and one column per
+                  river, named with its reach id. Sub-daily input is averaged to
+                  DAILY MEAN, matching how the daily zarr is built. 
+    --start/--end Restrict the window FETCHED. Default is the
+                  whole record.This window names the cache file, and with --warmup-years it
+                  is not the window actually scored -- see that flag.
+    --min-years   Minimum years of paired overlap a gauge must have. Default 1.
+                  under MIN_YEARS_FOR_RETURN they get no return level and no
+                  flood-detection scores, and under MIN_DAYS_PER_MONTH in a
+                  given month they get no metrics for that month.
+    --warmup-years  Drop this many years from the START of the fetched record
+                  before scoring, so spin-up from an assumed initial state is
+                  not evaluated. The trim happens AFTER the fetch, so the cache
+                  still covers the untrimmed window and is not invalidated.
+    --refresh     Discard the cached model array and re-read it.
+    --outdir      Where to write outputs. Default outputs/.
+    --data-dir    Directory holding the observed-gauge inputs -- the catalog xlsx
+                  and routing/gauge_data/. Defaults to $GEOGLOWS_EVAL_DATA, and
+                  failing that to a path that exists only on the author's
+                  machine, so set one of the two before the first run. Checked
+                  before anything else, so a wrong path fails immediately.
+    --label       Name for this run, shown on the map footer, the web page and
+                  its browser tab. Default RUN_LABEL below.
+
+INPUTS REQUIRED
+  Gauge CSVs        In <data-dir>/routing/gauge_data/, named
+                    {ISO_A3}_{provider}_{station}.csv, with
+                    columns datetime,discharge. Obtain them for the VPU being
+                    evaluated before running. A catalogued gauge with no CSV is
+                    skipped and reported in the run log. This can be downloaded from
+                    the AWS bucket.
+  Gauge catalog     <data-dir>/master_catalog_with_metadata.xlsx, covering all
+                    VPUs. Must contain
+                    final_river_id, gauge_id, ISO_A3, latitude, longitude. This also comes
+                    from the AWS bucket.
+  Network table     Fetched from S3 at run time. The v2-model-table Supplies stream order and
+                    drainage area.
+  Model discharge   Normally the daily zarr, fetched from S3 at run time --
+                    nothing to prepare. To score a different model instead, pass
+                    --model-parquet and point it at a parquet file; nothing else
+                    needs preparing for that either.
+
+                    Those two are the only inputs. Either way the array read is
+                    cached to cache/model_q_vpu<VPU>_<start>_<end>.npz and reused
+                    on the next run -- that .npz is an internal cache, not an
+                    input format to prepare yourself. It records which source
+                    built it, so pointing --model-parquet at a different file
+                    rebuilds rather than silently reusing the previous one, and a
+                    cache carrying no such stamp is rejected and rebuilt.
+                    --refresh forces a rebuild when the source has not changed.
+
+OUTPUTS WRITTEN
+  outputs/vpu<VPU>_metrics.parquet   one row per gauge, every metric below
+  outputs/vpu<VPU>_kge_map.png       static map of KGE' at gauge locations
+  outputs/vpu<VPU>_run.json          the settings this run used, read back by
+                                     serve.py and build_webapp.py: vpu, label,
+                                     date_start (the EVALUATION start, after any
+                                     warm-up trim), date_end, cache_start (the
+                                     window fetched, which names the cache file),
+                                     warmup_years, min_years, n_gauges, and the
+                                     KGE column name, label and no-skill line.
+  cache/model_q_vpu<VPU>_<start>_<end>.npz    the model array, GAUGED REACHES
+                                     ONLY, reused by later runs and read back by
+                                     serve.py and build_webapp.py
+
+
+
+NOTATION
+--------
+The model array is restricted on BOTH axes before anything is computed.
+
+  Rivers   Only reaches that carry a gauge are ever read. VPU 714 has 223,906
+           reaches and about 2,600 gauges, so this is most of what makes a run
+           affordable -- and it means the cached array is NOT a copy of the
+           model for that VPU, only the gauged slice of it.
+  Days     Only the requested window, minus any --warmup-years trim.
+
+Everything is computed per gauge, over PAIRED DAYS ONLY -- days where that gauge
+and the model both have a value. The paired record therefore differs per gauge.
+
+    o, s      observed / simulated daily mean discharge, m3 s-1
+    n         number of paired days
+    mo, ms    mean of o / of s
+    so, ss    standard deviation of o / of s   (population, ddof=0)
+    r         Pearson correlation of s against o
+
+ddof=0 means the standard deviations divide by n, not by n-1 -- the population
+convention rather than the sample one.
+
+
+THE METRICS, IN THE ORDER THEY ARE COMPUTED
+-------------------------------------------
+Sufficient statistics -- pair_stats(). Six numbers from which the whole
+NSE/KGE/RMSE family can be re-derived later without touching the zarr again:
+
+    n_pairs                n
+    mean_obs, mean_sim     mo, ms
+    sd_obs, sd_sim         so, ss
+    r                      Pearson correlation
+
+  column        formula                              range      best
+  ------------  -----------------------------------  ---------  ----
+  r             Pearson(s, o)                        [-1, 1]     1
+  spearman      Pearson(rank s, rank o)              [-1, 1]     1
+  alpha         ss / so            variability ratio [0, inf)    1
+  beta          ms / mo            bias ratio        (-inf, inf) 1
+  gamma         (ss/ms) / (so/mo)  CV ratio          [0, inf)    1
+  pbias_pct     100 * (beta - 1)                     (-inf, inf) 0
+  kge_2012      1 - sqrt((r-1)^2 + (gamma-1)^2 + (beta-1)^2)
+                                                     (-inf, 1]   1
+  rmse          sqrt(mean((s-o)^2))                  [0, inf)    0   m3/s
+  nse           1 - (rmse/so)^2                      (-inf, 1]   1
+  mae           mean(|s-o|)                          [0, inf)    0   m3/s
+  nrmse         rmse / mo                            [0, inf)    0
+  mae_rel       mae / mo                             [0, inf)    0
+
+Skill against the gauge's own day-of-year climatology -- skill_scores():
+
+  n_clim        paired days with a usable climatology reference
+  ss_clim       1 - MSE(model) / MSE(climatology)    (-inf, 1]   1
+  ss_clim_mae   1 - MAE(model) / MAE(climatology)    (-inf, 1]   1
+
+Flood detection at each series' own 2-year return level -- contingency_stats().
+Whole record only; the threshold is an annual property so there is no monthly
+counterpart. Each series is compared to ITS OWN 2-year level, so a model that
+runs low is not penalised for never reaching the gauge's absolute flow:
+
+  n_years_ams   annual maxima available (>= 10 required)
+  t2_obs        2-year return level of the observed record, m3/s
+  t2_sim        2-year return level of the modelled record, m3/s
+  hits          a   days both series are at or above their own level
+  false_alarms  b   model at or above its level, gauge not
+  misses        c   gauge at or above its level, model not
+  correct_neg   d   neither
+                    a + b + c + d = n, the paired days
+
+  pod           a/(a+c)               probability of detection: the share of the
+                                      gauge's flood days the model also flagged
+  far           b/(a+b)               false alarm ratio: the share of the model's
+                                      flood days the gauge did not flag
+  csi           a/(a+b+c)             critical success index: hits over every day
+                                      either series flagged, ignoring d
+  ets           (a-ar)/(a+b+c-ar)     equitable threat score: csi with the hits
+                                      expected by chance removed,
+                                      ar = (a+b)(a+c)/n
+  freq_bias     (a+b)/(a+c)           days the model flagged over days the gauge
+                                      flagged; 1 means the same number, not the
+                                      same days
+
+The 2-year level comes from a Gumbel Type-I fit to the annual maxima series, 
+with a minimum of 10 years.
+
+Per calendar month, MM = 01..12 -- monthly_stats(). Pools the same month across
+every year, so "08" is every August day in the record. EVERY metric above has a
+monthly counterpart, named <metric>_m<MM>:
+
+  n_m<MM>                  paired days in that month
+  mean_obs_m<MM>           mo within that month
+  mean_sim_m<MM>           ms
+  sd_obs_m<MM>             so
+  sd_sim_m<MM>             ss
+  r_m<MM>                  Pearson
+  spearman_m<MM>           Spearman rank correlation
+  alpha_m<MM>              ss / so
+  beta_m<MM>               ms / mo
+  gamma_m<MM>              (ss/ms) / (so/mo)
+  pbias_pct_m<MM>          100 * (beta - 1)
+  kge_2012_m<MM>           KGE' from that month's own r, gamma, beta
+  nse_m<MM>                1 - (rmse/so)^2
+  rmse_m<MM>               m3/s
+  mae_m<MM>                m3/s
+  nrmse_m<MM>              rmse / mo
+  mae_rel_m<MM>            mae / mo
+  n_clim_m<MM>             days in that month with a climatology reference
+  ss_clim_m<MM>            MSE skill vs climatology, scored on that month
+  ss_clim_mae_m<MM>        MAE skill vs climatology, scored on that month
+
+That is 20 metrics x 12 months = 240 columns. The parquet is wider still once
+the whole-record metrics, the flood-detection block and the gauge metadata are
+added; read its shape rather than trusting a number written here.
+
+FOUR THINGS ABOUT THE MONTHLY VALUES
+  1. Each one is calculated fresh from that month's days alone. Nothing is
+     carried over from the annual figures, so the twelve monthly values do not
+     average back to the annual one and cannot be added or decomposed into it.
+     Compare them with each other, not with the annual number.
+  2. ss_clim_m<MM> keeps the SAME leave-one-year-out day-of-year reference the
+     annual score uses -- the reference is not rebuilt per month -- and scores it
+     over that month's days only.
+  3. A month with fewer than MIN_DAYS_PER_MONTH (60) paired days gets only
+     n_m<MM>; everything else is absent for that month.
+  4. The guards are per-metric. rmse_m<MM> and mae_m<MM> only average the errors
+     themselves, so they are always defined; every other metric divides by a
+     statistic of the data and is absent when that divisor is zero -- r, alpha
+     and nse need a non-flat observed series, and beta, nrmse and mae_rel need a
+     non-zero observed mean. A month can therefore have rmse and mae while
+     lacking the rest, rather than being dropped entirely.
+
+Gauge metadata carried through for grouping and mapping: final_river_id,
+gauge_id, fname, latitude, longitude, strmOrder, USContArea (m2), koppen,
+ISO_A3, first_day, last_day.
+
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
+import pandas as pd
+from scipy.stats import rankdata
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+# Where the observed-gauge inputs live. There is no useful default -- the gauge
+# CSVs are not part of this repository -- so set GEOGLOWS_EVAL_DATA, or pass
+# --data-dir to this script. "data" is a placeholder that makes the failure
+# legible rather than a path that happens to work on one machine.
+#
+# The directory must contain:
+#     master_catalog_with_metadata.xlsx     the gauge catalog
+#     routing/gauge_data/*.csv              one CSV per gauge
+DATA_DIR = os.environ.get("GEOGLOWS_EVAL_DATA", "data")
+
+
+def data_paths(data_dir: str) -> tuple[str, str]:
+    """Resolve the catalog and gauge-CSV locations under `data_dir`.
+
+    Fails immediately and by name if either is missing. Both are read much later
+    -- the catalog in build_gauge_table(), the CSVs one at a time during pairing
+    -- so without this a wrong --data-dir surfaces either as a pandas error on an
+    unrelated line or, worse, as every gauge being silently skipped for "no CSV
+    on disk", which reads as missing data rather than a wrong path.
+    """
+    catalog = os.path.join(data_dir, "master_catalog_with_metadata.xlsx")
+    gauges = os.path.join(data_dir, "routing", "gauge_data")
+    missing = [p for p in (catalog, gauges) if not os.path.exists(p)]
+    if missing:
+        raise SystemExit(
+            "cannot find the observed-gauge inputs:\n"
+            + "".join(f"  missing: {p}\n" for p in missing)
+            + f"  looked under: {data_dir}\n"
+            "  set GEOGLOWS_EVAL_DATA or pass --data-dir to the directory holding\n"
+            "  master_catalog_with_metadata.xlsx and routing/gauge_data/")
+    return catalog, gauges
+
+
+# Resolved in main() from --data-dir; module-level defaults let serve.py and
+# build_webapp.py import GAUGE_DIR without re-parsing arguments.
+CATALOG_PATH = os.path.join(DATA_DIR, "master_catalog_with_metadata.xlsx")
+GAUGE_DIR = os.path.join(DATA_DIR, "routing", "gauge_data")
+
+ZARR_URL = "http://geoglows-v2.s3-us-west-2.amazonaws.com/retrospective/daily.zarr"
+MODEL_TABLE_URL = "http://geoglows-v2.s3-us-west-2.amazonaws.com/tables/v2-model-table.parquet"
+
+# The zarr time axis is "seconds since 1940-01-01", daily steps.
+ZARR_EPOCH = pd.Timestamp("1940-01-01")
+
+# Fetch window for the model array -- and the evaluation window too, unless
+# --warmup-years trims the front of it. None means "everything the model covers",
+# resolved from the zarr's own time axis at run time so it does not go stale as
+# the retrospective is extended.
+#
+# Both windows reach outputs/vpu<VPU>_run.json, which serve.py and
+# build_webapp.py read back: the fetch window as cache_start, the evaluation
+# window as date_start. They differ only when a warm-up trim is used.
+#
+# Freeze the window explicitly when comparing model versions, or a longer
+# retrospective will change the baseline underneath the comparison.
+DATE_START = None
+DATE_END = None
+
+# Name for the discharge being scored, carried into vpu<VPU>_run.json and from
+# there onto the web page and its browser tab. 
+#
+# Override it with --label whenever the model array is not the default
+# retrospective. 
+RUN_LABEL = "GEOGLOWS v2 retrospective"
+
+CACHE_DIR = "cache"
+OUTPUT_DIR = "outputs"
+
+ZARR_READ_THREADS = 16
+CHUNK_WIDTH = 50  # river_id chunk width of the Q array;
+
+# Columns read at once from a --model-parquet. A wide parquet of routed output
+# is gigabytes taken whole; 400 columns keeps peak memory near 1 GB.
+PARQUET_COL_BATCH = 400
+
+
+def source_tag(model_parquet: str | None) -> str:
+    """Identity of the discharge source, stamped into the cache .npz.
+
+    The cache is keyed on vpu and window only, which cannot distinguish two
+    different sources covering the same dates. 
+
+    Path plus size plus mtime, rather than a content hash: hashing a 2 GB parquet
+    on every run costs more than the read it protects.
+    """
+    if not model_parquet:
+        return f"zarr:{ZARR_URL}"
+    p = os.path.abspath(model_parquet)
+    st = os.stat(p)
+    return f"parquet:{p}:{st.st_size}:{int(st.st_mtime)}"
+
+
+def cache_is_current(path: str, want: str) -> bool:
+    """True if the cache at `path` is verifiably built from `want`.
+
+    A cache with no `source` key cannot be verified, so it is rejected and
+    rebuilt. Accepting it instead would mean trusting an array whose origin is
+    unknown while the run labels its outputs with whatever --label says.
+    """
+    z = np.load(path, allow_pickle=False)
+    if "source" not in z.files:
+        print(f"      cache {os.path.basename(path)} carries no source stamp; "
+              f"cannot verify what built it, re-reading.")
+        return False
+    got = str(z["source"])
+    if got == want:
+        return True
+    print(f"      cache {os.path.basename(path)} was built from a different source;"
+          f"\n        cached: {got}\n        wanted: {want}\n      re-reading.")
+    return False
+
+
+# The metric is KGE' (Kling et al. 2012) throughout. 
+#
+# The no-skill line sits at -0.41, not 0 (Knoben et al. 2019). Anything below it is worse than
+# predicting the observed mean.
+KGE_NO_SKILL = -0.41
+KGE_COL = "kge_2012"          # explicit in the column name on purpose
+KGE_LABEL = "KGE' (Kling 2012)"
+
+SURFACE = "#fcfcfb"
+INK_PRIMARY = "#0b0b0b"
+INK_SECONDARY = "#52514e"
+INK_MUTED = "#898781"
+HAIRLINE = "#e1e0d9"
+
+# Diverging red <-> gray <-> blue: red = poor, blue = good, neutral gray at the
+# centre. Both arms are monotonic in lightness and mirror each other within
+# 0.024 relative luminance, so neither side reads as "heavier" than the other.
+#
+# The palest step of each arm is deliberately omitted. With them included the
+# two steps flanking the midpoint measure dE 14.1 in normal vision -- below the
+# 15 floor -- so gauges just above and just below the centre were not reliably
+# distinguishable. Dropping them puts the flanking pair at dE 15.0 (protan) /
+# 21.6 (normal vision), which clears both floors.
+DIVERGING = [
+    "#661a1a", "#8f2424", "#b52f2f", "#d03b3b", "#dd625b", "#ea8a84",  # poor
+    "#f0efec",                                                          # neutral
+    "#6da7ec", "#3987e5", "#2a78d6", "#256abf", "#184f95", "#0d366b",  # good
+]
+
+# The colour scale is centred on 0 and clipped to +/- 1. Zero is the
+# conventional reading line, but it is NOT the statistical no-skill point --
+# that is KGE_NO_SKILL, which is marked separately on the colourbar.
+COLOR_LIMIT = 1.0
+
+LAND = "#f4f3ef"
+WATER = "#eaeae6"
+
+
+# --------------------------------------------------------------------------- #
+# Gauge table
+# --------------------------------------------------------------------------- #
+
+def provider_for(row: pd.Series) -> str:
+    """Reproduce the provider-name normalization used by download_observed_data.py.
+
+    The gauge CSV filenames are {ISO_A3}_{provider}_{gauge_id}.csv, so this has to
+    match that script exactly or the files will not be found.
+    """
+    p = row.get("excel_Name of Providing Entity")
+    if p is None or (isinstance(p, float) and math.isnan(p)) or str(p).strip().lower() == "nan":
+        p = row.get("jorge_Data_Source")
+    p = str(p).strip()
+    if p.lower() == "nan" or p == "":
+        p = "unknown"
+    if p == "Togo":
+        p = "DGRE"
+    if "India-WRIS" in p:
+        p = "WRIS"
+    return p
+
+
+def gauge_filename(row: pd.Series) -> str:
+    station = str(row.get("gauge_id")).strip()
+    if station.endswith(".0"):
+        station = station[:-2]
+    return f"{str(row['ISO_A3']).strip()}_{provider_for(row)}_{station}.csv"
+
+
+def build_gauge_table(vpu: int, catalog: str = CATALOG_PATH,
+                      gauge_dir: str = GAUGE_DIR) -> pd.DataFrame:
+    """Catalog gauges in `vpu` that have a real reach id, network attrs, and a CSV."""
+    print(f"[1/5] building gauge table for VPU {vpu}")
+
+    cat = pd.read_excel(catalog)
+    n_all = len(cat)
+    cat = cat.dropna(subset=["final_river_id"]).copy()
+    cat["final_river_id"] = cat["final_river_id"].astype(int)
+
+    # final_river_id <= 0 is an unmatched sentinel, not a reach.
+    cat = cat[cat["final_river_id"] > 0]
+    print(f"      {n_all} catalog rows -> {len(cat)} with a real reach id")
+
+    model = pd.read_parquet(
+        MODEL_TABLE_URL,
+        columns=["LINKNO", "VPUCode", "strmOrder", "USContArea"],
+    )
+    model = model[model["VPUCode"] == vpu]
+    print(f"      {len(model)} reaches in VPU {vpu}")
+
+    g = cat.merge(model, left_on="final_river_id", right_on="LINKNO", how="inner")
+    print(f"      {len(g)} catalog gauges fall in VPU {vpu}")
+
+    g["fname"] = g.apply(gauge_filename, axis=1)
+    g["path"] = g["fname"].map(lambda f: os.path.join(gauge_dir, f))
+    have = g["path"].map(os.path.exists)
+    print(f"      {int(have.sum())} of {len(g)} have a CSV on disk")
+    g = g[have]
+
+    # Only columns that compute_metrics() carries into the metric rows. Anything
+    # kept here but not listed in that st.update() call is silently dropped
+    # before the parquet, so the two lists have to be changed together.
+    keep = [
+        "final_river_id", "gauge_id", "fname", "path", "latitude", "longitude",
+        "ISO_A3", "river_name", "strmOrder", "USContArea",
+        "Koppen Group (as of 2024)",
+    ]
+    keep = [c for c in keep if c in g.columns]
+    g = g[keep].rename(columns={"Koppen Group (as of 2024)": "koppen"})
+
+    # gauge_id mixes numeric USGS ids with alphanumeric ones (e.g. Canadian
+    # '11AA005'), so pandas infers `object`; force str for a clean parquet schema.
+    for c in ("gauge_id", "koppen", "river_name", "ISO_A3"):
+        if c in g.columns:
+            g[c] = g[c].astype(str)
+    return g.reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Model discharge -- from the cache if present, otherwise read from the zarr
+# --------------------------------------------------------------------------- #
+
+def model_period() -> tuple[str, str]:
+    """First and last date in the retrospective, from the zarr's time axis.
+
+    Only the time coordinate is read (~250 KB), not the discharge array.
+    """
+    import fsspec
+    import zarr
+    z = zarr.open(fsspec.get_mapper(ZARR_URL), mode="r")
+    t = ZARR_EPOCH + pd.to_timedelta(z["time"][:], unit="s")
+    return t[0].strftime("%Y-%m-%d"), t[-1].strftime("%Y-%m-%d")
+
+
+def fetch_model_q(
+    river_ids: np.ndarray, date_start: str, date_end: str, vpu: int, refresh: bool
+) -> pd.DataFrame:
+    """Return a (time x river_id) DataFrame of modelled daily mean discharge.
+
+    Only the reaches in `river_ids` are read -- the gauged ones. The zarr holds
+    6,838,900 rivers and VPU 714 has about 2,600 gauges, so the returned frame
+    and the cache written from it are the gauged slice, not the whole model.
+
+    If a cache .npz for this vpu and window exists, carries a matching source
+    stamp, and covers every requested reach, it is returned as-is and the zarr is
+    never opened. A cache with no stamp, or one built from a different source, is
+    rejected and re-read -- see cache_is_current().
+
+    Reading the zarr: the Q array is chunked whole along time and CHUNK_WIDTH
+    wide along river_id, so each chunk holds the *full* time series for
+    CHUNK_WIDTH rivers. The efficient access pattern is therefore to group the
+    wanted columns by chunk and read one chunk-aligned block at a time.
+    """
+    import fsspec
+    import zarr
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache = os.path.join(CACHE_DIR, f"model_q_vpu{vpu}_{date_start}_{date_end}.npz")
+    tag = source_tag(None)
+    if os.path.exists(cache) and not refresh and cache_is_current(cache, tag):
+        z = np.load(cache, allow_pickle=False)
+        cached_ids = set(z["river_ids"].astype("int64").tolist())
+        wanted = set(np.unique(np.asarray(river_ids)).astype("int64").tolist())
+        missing = wanted - cached_ids
+        if missing:
+            # The cache key is only vpu + window, so it cannot tell that the
+            # requested reach set has grown -- which it does as soon as more
+            # gauge CSVs are downloaded. Reusing it anyway would drop those
+            # gauges, and compute_metrics would report them as "no model
+            # column", which reads as a claim about GEOGLOWS coverage rather
+            # than a stale local file.
+            #
+            # Note this re-reads the ZARR and overwrites `cache` in place, so a
+            # cache built from a parquet is replaced with retrospective
+            # discharge. That is the right outcome only if the zarr is what the
+            # run means to score -- when it is not, pass --model-parquet so the
+            # rebuild comes from the same source the cache did.
+            print(f"[2/5] cache {cache} is missing {len(missing)} of "
+                  f"{len(wanted)} requested reaches; re-reading the zarr")
+        else:
+            print(f"[2/5] model discharge from cache {cache}")
+            return pd.DataFrame(
+                z["q"],
+                index=pd.DatetimeIndex(z["dates"].astype("datetime64[ns]"), name="date"),
+                columns=z["river_ids"].astype("int64"),
+            )
+
+    # Several gauges can sit on one reach, so the wanted reach ids are not unique.
+    # Fetch each reach once; compute_metrics() looks columns up by reach id.
+    river_ids = np.unique(np.asarray(river_ids))
+
+    print(f"[2/5] reading model discharge from {ZARR_URL}")
+    t0 = time.time()
+    z = zarr.open(fsspec.get_mapper(ZARR_URL), mode="r")
+
+    all_ids = z["river_id"][:]
+    pos = pd.Series(np.arange(len(all_ids)), index=all_ids)
+    idx = pos.reindex(river_ids)
+    if idx.isna().any():
+        missing = int(idx.isna().sum())
+        print(f"      warning: {missing} reach ids absent from the zarr, dropped")
+    ok = idx.notna()
+    river_ids = np.asarray(river_ids)[ok.values]
+    col_idx = idx[ok].astype(int).values
+
+    times = ZARR_EPOCH + pd.to_timedelta(z["time"][:], unit="s")
+    tmask = (times >= pd.Timestamp(date_start)) & (times <= pd.Timestamp(date_end))
+    # Stop if the window misses the model record entirely. np.argmax on an
+    # all-False mask returns 0 rather than signalling failure, and so does the
+    # reversed one, so without this check an empty selection silently becomes
+    # the WHOLE record -- while the map footer and the cache filename still name
+    # the window that was asked for. Fail loudly rather than clamp: a clamped
+    # window would still be mislabelled.
+    if not tmask.any():
+        raise SystemExit(
+            f"requested window {date_start} .. {date_end} does not overlap the "
+            f"model record ({times[0].date()} .. {times[-1].date()})")
+    t_lo, t_hi = int(np.argmax(tmask)), int(len(tmask) - np.argmax(tmask[::-1]))
+    times = times[t_lo:t_hi]
+    print(f"      {len(river_ids)} reaches x {len(times)} days "
+          f"({times[0].date()} to {times[-1].date()})")
+
+    # Group wanted columns by their chunk so each chunk is fetched exactly once.
+    by_chunk: dict[int, list[int]] = {}
+    for j, c in enumerate(col_idx):
+        by_chunk.setdefault(int(c) // CHUNK_WIDTH, []).append(j)
+    print(f"      {len(by_chunk)} chunks to fetch on {ZARR_READ_THREADS} threads")
+
+    out = np.full((len(times), len(col_idx)), np.nan, dtype="float32")
+    Q = z["Q"]
+    done = [0]
+
+    def read_chunk(item):
+        chunk, targets = item
+        lo = chunk * CHUNK_WIDTH
+        block = Q[t_lo:t_hi, lo:lo + CHUNK_WIDTH]
+        for j in targets:
+            out[:, j] = block[:, int(col_idx[j]) - lo]
+        done[0] += 1
+        if done[0] % 200 == 0:
+            print(f"      {done[0]}/{len(by_chunk)} chunks ({time.time()-t0:.0f}s)")
+
+    with ThreadPoolExecutor(max_workers=ZARR_READ_THREADS) as pool:
+        list(pool.map(read_chunk, by_chunk.items()))
+
+    np.savez_compressed(cache, q=out, source=np.array(tag),
+                        dates=np.asarray(times, dtype="datetime64[ns]"),
+                        river_ids=river_ids.astype("int64"))
+    print(f"      done in {time.time()-t0:.0f}s, cached to {cache}")
+    return pd.DataFrame(out, index=pd.DatetimeIndex(times, name="date"),
+                        columns=river_ids.astype("int64"))
+
+
+# --------------------------------------------------------------------------- #
+# Observed discharge
+# --------------------------------------------------------------------------- #
+
+def parquet_period(path: str) -> tuple[str, str]:
+    """First and last date in a model-discharge parquet, from its index alone."""
+    import pyarrow.parquet as pq
+    idx = pq.ParquetFile(path).schema_arrow.names[0]
+    t = pd.to_datetime(pq.read_table(path, columns=[idx]).to_pandas().index)
+    return t.min().strftime("%Y-%m-%d"), t.max().strftime("%Y-%m-%d")
+
+
+def model_q_from_parquet(path: str, river_ids: np.ndarray, date_start: str,
+                         date_end: str, vpu: int, refresh: bool) -> pd.DataFrame:
+    """Read modelled discharge from a wide parquet and cache it as an npz.
+
+    EXPECTED LAYOUT. A datetime index, and one column per river, named with the
+    reach id (LINKNO). Column names may be strings -- parquet always stores them
+    that way -- and are converted to int. Values are discharge in m3/s.
+
+    ONLY GAUGED REACHES ARE READ. parquet is columnar, so restricting to the
+    reaches that actually have a gauge means the other columns are never touched
+    on disk. A routed file covering a whole VPU can carry hundreds of thousands
+    of rivers while only a few thousand are gauged, and reading the rest would
+    cost time and memory for columns no metric can use. This mirrors what
+    fetch_model_q() does with the zarr, which selects its columns the same way.
+
+    SUB-DAILY INPUT IS AVERAGED TO DAILY MEAN, matching how the GEOGLOWS daily
+    zarr is built from hourly routing, so the two are comparable. This is not a
+    neutral choice: on a 200-reach sample of an hourly routed file the daily
+    MAXIMUM ran 39% above the daily mean at the median reach, so a run scored
+    against daily maxima would not be comparable with anything else here. The
+    aggregation applied is printed.
+
+    The result is written to the same cache .npz that fetch_model_q() uses, so
+    build_webapp.py finds it by the same name and a re-run costs nothing.
+    """
+    import pyarrow.parquet as pq
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache = os.path.join(CACHE_DIR, f"model_q_vpu{vpu}_{date_start}_{date_end}.npz")
+    tag = source_tag(path)
+    if os.path.exists(cache) and not refresh and cache_is_current(cache, tag):
+        z = np.load(cache, allow_pickle=False)
+        print(f"[2/5] model discharge from cache {cache}")
+        return pd.DataFrame(
+            z["q"],
+            index=pd.DatetimeIndex(z["dates"].astype("datetime64[ns]"), name="date"),
+            columns=z["river_ids"].astype("int64"),
+        )
+
+    print(f"[2/5] reading model discharge from {path}")
+    t0 = time.time()
+    pf = pq.ParquetFile(path)
+    names = pf.schema_arrow.names
+    idx_col, present = names[0], names[1:]
+    if not present:
+        sys.exit(f"{path}: no discharge columns beside the index '{idx_col}'")
+
+    # Keep only columns that carry a gauge. Column names are strings in parquet;
+    # anything that is not an integer reach id cannot be matched and is skipped.
+    wanted = set(int(v) for v in np.unique(np.asarray(river_ids)))
+    cols, seen = [], set()
+    for c in present:
+        try:
+            rid = int(c)
+        except ValueError:
+            continue
+        if rid in wanted and rid not in seen:
+            cols.append(c)
+            seen.add(rid)
+    if not cols:
+        sys.exit(f"{path}: none of its {len(present)} columns match a gauged "
+                 f"reach in VPU {vpu}. Column names must be reach ids "
+                 f"(e.g. {present[0]!r} was found).")
+    n_absent = len(wanted) - len(cols)
+    print(f"      {len(cols):,} of {len(present):,} columns carry a gauge"
+          + (f"; {n_absent:,} gauged reaches absent from the file" if n_absent else ""))
+
+    # Read in column batches: a wide parquet of this shape is gigabytes if taken
+    # in one piece, and only the daily means are kept.
+    parts, ids, dates = [], [], None
+    for i in range(0, len(cols), PARQUET_COL_BATCH):
+        batch = cols[i:i + PARQUET_COL_BATCH]
+        df = pq.read_table(path, columns=[idx_col] + batch).to_pandas()
+        df.index = pd.to_datetime(df.index)
+        step = df.index.to_series().diff().median()
+        df = df.loc[(df.index >= pd.Timestamp(date_start)) &
+                    (df.index <= pd.Timestamp(date_end) + pd.Timedelta(days=1)
+                     - pd.Timedelta(seconds=1))]
+        if df.empty:
+            sys.exit(f"{path}: no rows between {date_start} and {date_end}")
+        d = df if step >= pd.Timedelta(days=1) else df.resample("D").mean()
+        parts.append(d.to_numpy("float32"))
+        ids.extend(batch)
+        dates = d.index
+        if i == 0:
+            print(f"      input step {step}; "
+                  f"{'kept as daily' if step >= pd.Timedelta(days=1) else 'averaged to DAILY MEAN'}")
+
+    q = np.concatenate(parts, axis=1)
+    river_ids = np.asarray([int(c) for c in ids], dtype="int64")
+
+    print(f"      {q.shape[1]} reaches x {q.shape[0]} days "
+          f"({dates[0].date()} to {dates[-1].date()}) in {time.time()-t0:.0f}s")
+    np.savez_compressed(cache, q=q,
+                        dates=np.asarray(dates, dtype="datetime64[ns]"),
+                        river_ids=river_ids, source=np.array(tag))
+    print(f"      cached to {cache}")
+    return pd.DataFrame(q, index=pd.DatetimeIndex(dates, name="date"),
+                        columns=river_ids)
+
+
+def load_gauge_series(path: str) -> pd.Series | None:
+    """Read one gauge CSV as a daily discharge series, or None if unusable.
+
+    Returns None for stage-only files: a handful of catalog entries point at CSVs
+    whose value column is `water_level`, not `discharge`.
+    """
+    try:
+        head = pd.read_csv(path, nrows=0)
+        if "discharge" not in head.columns:
+            return None
+        d = pd.read_csv(path, usecols=["datetime", "discharge"],
+                        parse_dates=["datetime"])
+    except Exception:
+        return None
+    if d.empty:
+        return None
+    d["datetime"] = d["datetime"].dt.floor("D")
+    # Duplicate dates do occur; keep the first reading for the day.
+    s = d.drop_duplicates("datetime").set_index("datetime")["discharge"]
+    return s[s.notna()]
+
+
+# --------------------------------------------------------------------------- #
+# Metrics
+# --------------------------------------------------------------------------- #
+
+def metrics_from_pair(sim: np.ndarray, obs: np.ndarray) -> dict:
+    """Every paired-series metric, from one (sim, obs) pair of equal length.
+
+    Called by pair_stats() for the whole record and by monthly_stats() once per
+    calendar month, so a metric added here appears in both.
+
+    Each metric is written only if its own divisor is non-zero, so a gauge with a
+    flat or all-zero record still gets rmse and mae rather than being dropped:
+
+        always                        n, mean_obs, mean_sim, sd_obs, sd_sim,
+                                      rmse, mae
+        if obs varies                 alpha, nse
+        if obs and sim both vary      r, spearman
+        if mean_obs != 0              beta, pbias_pct, nrmse, mae_rel
+        if all of the above, and
+        mean_sim != 0 and gamma
+        is finite                     gamma, kge_2012
+
+    "varies" is tested as max > min, not as sd > 0 -- see the note on the guards
+    below for why the two are not interchangeable here.
+    """
+    out = {}
+    n = sim.size
+    if n < 2:
+        return out
+
+    mo, ms = float(obs.mean()), float(sim.mean())
+    so, ss = float(obs.std(ddof=0)), float(sim.std(ddof=0))
+    out.update(mean_obs=mo, mean_sim=ms, sd_obs=so, sd_sim=ss)
+
+    # Whether a series varies is decided by comparing its extremes, NOT by
+    # testing its standard deviation against zero. numpy computes the spread as
+    # deviations about a computed mean, and that mean is often a rounding error
+    # away from the true value, so a genuinely constant series can report a
+    # spread of ~1e-16 instead of 0. Measured: 11 of 28 constant arrays do this,
+    # e.g. np.full(900, 3.7).std(ddof=0) == 8.88e-16. Dividing by that speck
+    # writes alpha ~ 3e15, nse ~ -1e31 and kge_2012 ~ -2e15 into the table.
+    #
+    # max > min is an exact comparison on the stored values, so it cannot be
+    # fooled by how the mean was summed, and it needs no tolerance to tune. It
+    # also puts r and spearman on the same footing: rankdata() of a constant
+    # series is genuinely constant, so spearman returned NaN where r returned
+    # rounding noise, even though both were gated on the same condition.
+    obs_varies = bool(obs.max() > obs.min())
+    sim_varies = bool(sim.max() > sim.min())
+
+    rmse = float(np.sqrt(np.mean((sim - obs) ** 2)))
+    mae = float(np.mean(np.abs(sim - obs)))
+    out.update(rmse=rmse, mae=mae)
+
+    if obs_varies:
+        out["alpha"] = ss / so                    # 0 is meaningful: no variability
+        out["nse"] = 1.0 - (rmse / so) ** 2
+    r = None
+    if obs_varies and sim_varies:
+        r = float(np.corrcoef(sim, obs)[0, 1])
+        out["r"] = r
+        # Spearman is Pearson on the ranks, with ties averaged. A constant series
+        # has constant ranks, so it needs the same non-flat condition as r.
+        out["spearman"] = float(np.corrcoef(rankdata(sim), rankdata(obs))[0, 1])
+
+    if mo != 0:
+        beta = ms / mo
+        out["beta"] = beta
+        out["pbias_pct"] = 100.0 * (beta - 1.0)
+        out["nrmse"] = rmse / mo
+        out["mae_rel"] = mae / mo
+        if obs_varies and sim_varies and ms != 0:
+            gamma = (ss / ms) / (so / mo)
+            if np.isfinite(gamma):
+                out["gamma"] = float(gamma)
+                # r is a float here: it is assigned under exactly the
+                # obs_varies and sim_varies condition this branch also requires.
+                out["kge_2012"] = 1.0 - math.sqrt(
+                    (r - 1) ** 2 + (gamma - 1) ** 2 + (beta - 1) ** 2)
+    return out
+
+
+def pair_stats(sim: np.ndarray, obs: np.ndarray) -> dict:
+    """Whole-record metrics for one gauge. See the module docstring for the table.
+
+    A thin wrapper over metrics_from_pair(), which is also what monthly_stats()
+    uses, so the annual and per-month figures are computed by identical code.
+    """
+    out = {"n_pairs": sim.size}
+    out.update(metrics_from_pair(sim, obs))
+    return out
+
+# Minimum annual maxima before a 2-year return level is estimated. The T=2 level
+# is the median of the annual maximum distribution, so it is the best-determined
+# quantile you can ask for -- but a median of fewer than this many values is not
+# worth reporting.
+MIN_YEARS_FOR_RETURN = 10
+
+
+def contingency_stats(both: pd.DataFrame, sim_full: pd.Series,
+                      obs_full: pd.Series) -> dict:
+    """Flood-detection scores at each series' own 2-year return level.
+
+    THE THRESHOLD. For each series independently, take the maximum flow in each
+    calendar year and fit a Gumbel Type-I distribution by method of moments,
+    evaluated at T=2. This is the method RFS itself uses for return periods, so
+    the threshold here is comparable with the return periods GEOGLOWS publishes.
+
+    Annual maxima come from each series' WHOLE record inside the evaluation
+    window, not from the days the two series happen to share. A flood level is a
+    property of a river, so the model's threshold should not move because a gauge
+    was offline. Verified: computed this way, t2_sim reproduces the published
+    `gumbel_daily` variable to within 0.1%, at every reach tested. Restricting to
+    paired days instead put it about 5% low.
+
+    Note the published `gumbel` variable -- the one geoglows.data.return_periods()
+    returns -- is the HOURLY one, which runs ~12.6% higher than `gumbel_daily`
+    because hourly peaks exceed daily means. This evaluation is daily throughout,
+    so `gumbel_daily` is its counterpart.
+
+    geoglows.analyze.gumbel1() is called directly rather than reimplemented, so
+    the two cannot drift apart:
+
+        x_T = -ln(-ln(1 - 1/T)) * std * 0.7797 + xbar - 0.45 * std
+
+    where xbar and std are the mean and the POPULATION standard deviation
+    (ddof=0) of the annual maxima. 0.7797 is sqrt(6)/pi and 0.45 is
+    0.5772 * 0.7797, which is what makes it method of moments.
+
+    WHY EACH SERIES GETS ITS OWN THRESHOLD. A model with a volume bias would
+    seldom reach the observed threshold at all, and every score would collapse
+    into a restatement of that bias. Comparing each series to its own 2-year
+    level asks a cleaner question: on the days the gauge calls a 2-year flood,
+    does the model also call one? It is a detection test, invariant to
+    systematic bias.
+
+    HOW MANY DAYS EACH SERIES FLAGS. A 2-year level is exceeded in about half of
+    years, but a flood spans several days, so the number of exceedance DAYS
+    depends on peak width and is not fixed by the threshold. The two series can
+    therefore flag different numbers of days, which means these are not purely a
+    timing test. freq_bias is stored so that can be read off rather than
+    assumed.
+
+    Contingency table on daily exceedances (>= threshold):
+        a hits            both exceed
+        b false alarms    model exceeds, gauge does not
+        c misses          gauge exceeds, model does not
+        d correct negs    neither
+
+        pod  = a/(a+c)              probability of detection
+        far  = b/(a+b)              false alarm ratio
+        csi  = a/(a+b+c)            critical success index
+        ets  = (a-ar)/(a+b+c-ar)    equitable threat score, ar = (a+b)(a+c)/n
+        freq_bias = (a+b)/(a+c)
+
+    Note that flood days cluster: one flood spans several consecutive days, so
+    these count days, not independent events. Declustering would change the
+    counts.
+    """
+    out = {}
+    o = both["obs"]
+    s = both["sim"]
+
+    # Annual maxima by calendar year. A basin whose flood season spans the new year can
+    # therefore have one event split across two years.
+    ams_o = obs_full.groupby(obs_full.index.year).max().dropna()
+    ams_s = sim_full.groupby(sim_full.index.year).max().dropna()
+    n_years = min(len(ams_o), len(ams_s))    # both were just dropna()'d above
+    out["n_years_ams"] = n_years
+    if n_years < MIN_YEARS_FOR_RETURN:
+        return out
+
+    # Called from the geoglows package so this stays identical to RFS.
+    from geoglows.analyze import gumbel1
+    t2_o = float(gumbel1(2, float(ams_o.mean()), float(ams_o.std(ddof=0))))
+    t2_s = float(gumbel1(2, float(ams_s.mean()), float(ams_s.std(ddof=0))))
+    out["t2_obs"] = t2_o
+    out["t2_sim"] = t2_s
+    if not (t2_o > 0 and t2_s > 0):
+        return out                       # an all-dry record has no flood level
+
+    eo = (o >= t2_o).to_numpy()
+    es = (s >= t2_s).to_numpy()
+    a = int(np.sum(eo & es))
+    b = int(np.sum(~eo & es))
+    c = int(np.sum(eo & ~es))
+    d = int(np.sum(~eo & ~es))
+    n = a + b + c + d
+    out.update(hits=a, false_alarms=b, misses=c, correct_neg=d)
+
+    if a + c > 0:
+        out["pod"] = a / (a + c)
+        out["freq_bias"] = (a + b) / (a + c)
+    if a + b > 0:
+        out["far"] = b / (a + b)
+    if a + b + c > 0:
+        out["csi"] = a / (a + b + c)
+        ar = (a + b) * (a + c) / n
+        if (a + b + c - ar) != 0:
+            out["ets"] = (a - ar) / (a + b + c - ar)
+    return out
+
+
+def loo_climatology(obs: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    """Leave-one-year-out day-of-year climatology, aligned to `obs`.
+
+    Each day is predicted by the mean of that day-of-year across every OTHER
+    year, so the reference is never fitted to the day it is scored on. The
+    vectorised form of that is (total_for_doy - this_value) / (count_for_doy - 1).
+
+    Returns (clim, ok): clim[i] is the reference for obs[i], and ok[i] is False
+    where that day-of-year occurs only once in the record, leaving nothing to
+    average once the day itself is removed.
+
+    Shared by skill_scores() and monthly_stats() so the monthly scores use the
+    same reference as the annual one rather than a separately built copy.
+    """
+    doy = obs.index.dayofyear
+    ov = obs.to_numpy()
+    tot = obs.groupby(doy).sum().reindex(doy).to_numpy()
+    cnt = obs.groupby(doy).size().reindex(doy).to_numpy()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        clim = (tot - ov) / (cnt - 1)
+    return clim, np.isfinite(clim) & (cnt > 1)
+
+
+def climatology_skill(sim: np.ndarray, obs: np.ndarray, ref: np.ndarray) -> dict:
+    """SS = 1 - loss(model) / loss(reference), for squared and absolute error.
+
+      > 0  the model beats the gauge's own seasonal cycle
+      = 0  no better than knowing the time of year
+      < 0  worse than knowing only the time of year
+
+    The MSE and MAE versions can disagree substantially, because squaring weights
+    the largest misses far more heavily. Both are stored; compare them rather
+    than assuming they agree. Each is written only if its reference loss is
+    non-zero.
+    """
+    out = {}
+    mse_ref = float(np.mean((ref - obs) ** 2))
+    if mse_ref > 0:
+        out["ss_clim"] = 1.0 - float(np.mean((sim - obs) ** 2)) / mse_ref
+    mae_ref = float(np.mean(np.abs(ref - obs)))
+    if mae_ref > 0:
+        out["ss_clim_mae"] = 1.0 - float(np.mean(np.abs(sim - obs))) / mae_ref
+    return out
+
+
+def skill_scores(both: pd.DataFrame) -> dict:
+    """Skill of the simulation against the observed day-of-year climatology.
+
+        SS = 1 - E_model / E_reference
+
+    0 means "no better than the reference", 1 is perfect, negative is worse.
+
+    The reference is the gauge's own day-of-year climatology. Measured on a
+    500-gauge sample from this VPU: that reference alone achieves r = 0.215
+    against the observations, versus the model's 0.480.
+
+    NSE is already the skill score against a flat observed mean, so that
+    benchmark is not repeated here.
+
+    The climatology is built leave-one-year-out -- each day is predicted by the
+    mean of that day-of-year across every *other* year -- so the reference is not
+    fitted to the day it is scored on. It is not smoothed across neighbouring
+    days, which would make it a slightly stronger benchmark.
+    """
+    clim, ok = loo_climatology(both["obs"])
+    if ok.sum() < 365:
+        return {}
+
+    out = {"n_clim": int(ok.sum())}
+    out.update(climatology_skill(both["sim"].to_numpy()[ok],
+                                 both["obs"].to_numpy()[ok],
+                                 clim[ok]))
+    return out
+
+
+# Minimum paired days within a calendar month before that month's metrics are
+# reported. On a long record it trims almost nothing -- the median gauge-month on
+# the full VPU 714 run holds ~1,590 days.
+#
+# It is NOT inert at the --min-years default of 1: a gauge admitted with about a
+# year of overlap holds roughly 30 paired days per calendar month, below this
+# floor, so every month reports only n_m<MM> and no metrics. See KNOWN_ISSUES
+# section O for the threshold sweep.
+MIN_DAYS_PER_MONTH = 60
+
+
+def monthly_stats(both: pd.DataFrame) -> dict:
+    """Every whole-record metric, recomputed within each calendar month.
+
+    Pools the same month across all years -- every January day against every
+    January day -- so this is "how does the model do in January", not a
+    per-January-of-each-year series.
+
+    Columns are <metric>_m<MM> for MM = 01..12, matching the whole-record names.
+    A month with fewer than MIN_DAYS_PER_MONTH paired days gets only n_m<MM>.
+
+    WHAT A MONTHLY VALUE MEANS. Conditioning on one month compresses the flow
+    range, so these are NOT slices of the annual figures. Every moment is taken
+    from that month's own data, so alpha, beta and gamma are ratios of
+    within-month statistics, and a monthly KGE' is built from those. Read them
+    as within-month scores.
+
+    ss_clim_m<MM> keeps the SAME leave-one-year-out day-of-year reference the
+    annual score uses -- the reference is not rebuilt per month -- and simply
+    scores it over that month's days. So it answers "within January, does the
+    model beat the seasonal expectation for those particular days".
+    """
+    out = {}
+    mon = both.index.month
+
+    # The leave-one-year-out climatology is built once over the whole record, so
+    # that a month's reference is identical to the one the annual score used.
+    o_all = both["obs"]
+    doy = o_all.index.dayofyear
+    ov_all = o_all.to_numpy()
+    clim_all, clim_ok = loo_climatology(o_all)
+
+    for m in range(1, 13):
+        sel = mon == m
+        n = int(sel.sum())
+        out[f"n_m{m:02d}"] = n
+        if n < MIN_DAYS_PER_MONTH:
+            continue
+
+        s = both["sim"].to_numpy("float64")[sel]
+        o = both["obs"].to_numpy("float64")[sel]
+        for k, v in metrics_from_pair(s, o).items():
+            out[f"{k}_m{m:02d}"] = v
+
+        # Skill against the shared annual climatology, scored on this month only.
+        ok = sel & clim_ok
+        if ok.sum() >= MIN_DAYS_PER_MONTH:
+            out[f"n_clim_m{m:02d}"] = int(ok.sum())
+            for k, v in climatology_skill(both["sim"].to_numpy("float64")[ok],
+                                          ov_all[ok], clim_all[ok]).items():
+                out[f"{k}_m{m:02d}"] = v
+    return out
+
+
+def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
+                    min_years: float) -> pd.DataFrame:
+    """Pair each gauge against its reach and compute the metric table."""
+    # The threshold counts PAIRED DAYS, not elapsed years: a gauge reporting
+    # sparsely for thirty years can still fail it. Print the day count so the
+    # filter cannot be misread as a span. See KNOWN_ISSUES section Q.
+    min_days = int(round(min_years * 365.25))
+    print(f"[3/5] pairing {len(gauges)} gauges "
+          f"(minimum {min_days:,} paired days = {min_years}y)")
+
+    rows, n_stage, n_short, n_empty = [], 0, 0, 0
+    for i, g in enumerate(gauges.itertuples(index=False), start=1):
+        if i % 500 == 0:
+            print(f"      {i}/{len(gauges)}")
+
+        obs = load_gauge_series(g.path)
+        if obs is None:
+            n_stage += 1
+            continue
+        if g.final_river_id not in model.columns:
+            n_empty += 1
+            continue
+
+        sim = model[g.final_river_id]
+        both = pd.concat([sim.rename("sim"), obs.rename("obs")], axis=1,
+                         join="inner").dropna()
+        if len(both) < min_days:
+            n_short += 1
+            continue
+
+        st = pair_stats(both["sim"].to_numpy("float64"),
+                        both["obs"].to_numpy("float64"))
+        st.update(skill_scores(both))
+        # Thresholds from each series' whole record in the window; the
+        # contingency counts below still use the paired days only.
+        # sim is already indexed on model.index; only obs needs clipping to it.
+        st.update(contingency_stats(both, sim.dropna(),
+                                    obs.reindex(model.index).dropna()))
+        st.update(monthly_stats(both))
+        # Every gauge attribute that reaches the parquet is listed here. A column
+        # kept by build_gauge_table() but missing from this call is silently
+        # dropped, so the two lists have to be changed together.
+        st.update(final_river_id=g.final_river_id, gauge_id=g.gauge_id,
+                  fname=g.fname, latitude=g.latitude, longitude=g.longitude,
+                  strmOrder=g.strmOrder, USContArea=g.USContArea,
+                  koppen=getattr(g, "koppen", None), ISO_A3=g.ISO_A3,
+                  river_name=getattr(g, "river_name", None),
+                  first_day=both.index.min(), last_day=both.index.max())
+        rows.append(st)
+
+    print(f"      kept {len(rows)}  |  skipped: {n_stage} stage-only, "
+          f"{n_short} under {min_days:,} paired days, {n_empty} absent from the "
+          f"model array")
+
+    m = pd.DataFrame(rows)
+    if m.empty:
+        sys.exit("no gauges survived the filters")
+
+    # One reach can carry several gauges; keep the longest paired record so a
+    # single reach is not scored twice in the aggregate statistics.
+    before = len(m)
+    m = (m.sort_values("n_pairs", ascending=False)
+           .drop_duplicates("final_river_id", keep="first")
+           .reset_index(drop=True))
+    if before != len(m):
+        print(f"      dropped {before-len(m)} duplicate gauges on shared reaches")
+    return m
+
+
+# --------------------------------------------------------------------------- #
+# Map
+# --------------------------------------------------------------------------- #
+
+def plot_kge_map(m: pd.DataFrame, vpu: int, out_png: str,
+                 date_start: str, date_end: str, run_label: str) -> None:
+    """Scatter KGE' at the gauge locations.
+
+    Colour rules: a diverging red-gray-blue scale centred on 0 and clipped to
+    +/-COLOR_LIMIT. Clipping is what keeps the scale readable -- KGE' is
+    unbounded below, so without it a handful of very poor gauges would flatten
+    everything else into the middle. Points are drawn worst-first so poor gauges
+    are not hidden by overplotting, and the no-skill benchmark is marked as a
+    line on the colourbar rather than given a separate colour of its own.
+
+    run_label names the discharge being scored and goes in the footer. The PNG is
+    the one output that travels without a run.json beside it, so it is the one
+    that most needs to say what it is.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+
+    col = KGE_COL
+    d = m[np.isfinite(m[col])].copy()
+    print(f"[5/5] mapping {col} for {len(d)} gauges -> {out_png}")
+
+    cmap = LinearSegmentedColormap.from_list("kge_div", DIVERGING)
+    norm = Normalize(vmin=-COLOR_LIMIT, vmax=COLOR_LIMIT)
+    n_clipped = int((d[col] < -COLOR_LIMIT).sum())
+
+    lon0, lon1 = d.longitude.min() - 1.5, d.longitude.max() + 1.5
+    lat0, lat1 = d.latitude.min() - 1.0, d.latitude.max() + 1.0
+
+    fig = plt.figure(figsize=(13, 8.5), facecolor=SURFACE)
+    ax = plt.axes(projection=ccrs.PlateCarree(), facecolor=WATER)
+    ax.set_extent([lon0, lon1, lat0, lat1], crs=ccrs.PlateCarree())
+
+    # Recessive basemap: the data is the subject, geography is orientation only.
+    ax.add_feature(cfeature.LAND.with_scale("50m"), facecolor=LAND, zorder=0)
+    ax.add_feature(cfeature.OCEAN.with_scale("50m"), facecolor=WATER, zorder=0)
+    ax.add_feature(cfeature.LAKES.with_scale("50m"), facecolor=WATER,
+                   edgecolor=HAIRLINE, linewidth=0.4, zorder=1)
+    ax.add_feature(cfeature.STATES.with_scale("50m"), edgecolor=HAIRLINE,
+                   linewidth=0.5, zorder=2)
+    ax.add_feature(cfeature.BORDERS.with_scale("50m"), edgecolor=INK_MUTED,
+                   linewidth=0.6, zorder=2)
+    ax.add_feature(cfeature.COASTLINE.with_scale("50m"), edgecolor=INK_MUTED,
+                   linewidth=0.6, zorder=2)
+
+    # Draw worst-first so poor gauges are never hidden under good ones by
+    # overplotting. With a diverging scale the poor end is already red, so the
+    # separate "below no-skill" marker is no longer needed.
+    ds = d.sort_values(col, ascending=False)
+    ax.scatter(ds.longitude, ds.latitude, c=ds[col].clip(-COLOR_LIMIT, COLOR_LIMIT),
+               cmap=cmap, norm=norm, s=18, linewidth=0.3, edgecolor=SURFACE,
+               transform=ccrs.PlateCarree(), zorder=3)
+
+    gl = ax.gridlines(draw_labels=True, linewidth=0.4, color=HAIRLINE, alpha=0.9)
+    gl.top_labels = gl.right_labels = False
+    gl.xlabel_style = gl.ylabel_style = {"size": 8, "color": INK_MUTED}
+
+    label = KGE_LABEL
+    cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax,
+                      orientation="vertical", fraction=0.026, pad=0.02,
+                      extend="min")
+    cb.set_label(label, size=9.5, color=INK_SECONDARY)
+    cb.ax.tick_params(labelsize=8, colors=INK_MUTED, length=2)
+    cb.outline.set_visible(False)
+
+    # Mark the true no-skill line. It is not 0, and the difference matters:
+    # everything between -0.41 and 0 still beats the mean-flow benchmark.
+    cb.ax.axhline(KGE_NO_SKILL, color=INK_PRIMARY, linewidth=1.1)
+    cb.ax.text(1.9, KGE_NO_SKILL, f"  {KGE_NO_SKILL}  no skill", va="center",
+               ha="left", fontsize=7.4, color=INK_SECONDARY,
+               transform=cb.ax.get_yaxis_transform())
+
+    med = d[col].median()
+    frac_bad = 100.0 * (d[col] < KGE_NO_SKILL).mean()
+    frac_good = 100.0 * (d[col] >= 0.5).mean()
+    med_yrs = (d["n_pairs"] / 365.25).median()
+
+    ax.set_title(f"{label} at gauge locations — VPU {vpu}",
+                 fontsize=15, color=INK_PRIMARY, pad=22, loc="left")
+    clip_note = f"  ·  {n_clipped} gauges below −1 shown at the scale floor" if n_clipped else ""
+    ax.text(0.0, 1.028,
+            f"{len(d):,} gauges  ·  median {med:.2f}  ·  "
+            f"{frac_good:.0f}% at or above 0.50  ·  "
+            f"{frac_bad:.0f}% below the no-skill benchmark  ·  "
+            f"median {med_yrs:.0f} yr of paired record per gauge{clip_note}",
+            transform=ax.transAxes, fontsize=9.5, color=INK_SECONDARY)
+
+    fig.text(0.005, 0.012,
+             f"Model: {run_label} (daily mean). Observed: daily mean gauge discharge. "
+             "Each gauge is scored only on the days where that gauge and the model both have data,\n"
+             "so the paired record differs per gauge. Points drawn worst-first so poor gauges are "
+             f"not hidden by overplotting. KGE = {KGE_NO_SKILL} is the mean-flow benchmark "
+             f"(Knoben et al. 2019), not 0.  Evaluation window {date_start} to {date_end}.",
+             fontsize=7.2, color=INK_MUTED, va="bottom")
+
+    fig.savefig(out_png, dpi=170, bbox_inches="tight", facecolor=SURFACE)
+    plt.close(fig)
+
+
+# --------------------------------------------------------------------------- #
+
+def summarize(m: pd.DataFrame) -> None:
+    col = KGE_COL
+    v = m[col].dropna()
+    print(f"\n{'='*62}\n{col} summary over {len(v)} gauges\n{'='*62}")
+    for q in (0.05, 0.25, 0.50, 0.75, 0.95):
+        print(f"  p{int(q*100):02d}  {v.quantile(q):8.3f}")
+    print(f"  mean {v.mean():8.3f}   (report the median instead; KGE is unbounded below)")
+    print(f"\n  >= 0.75        {100*(v>=0.75).mean():5.1f}%")
+    print(f"  >= 0.50        {100*(v>=0.50).mean():5.1f}%")
+    print(f"  >= 0.00        {100*(v>=0.00).mean():5.1f}%")
+    print(f"  >= {KGE_NO_SKILL} (skill) {100*(v>=KGE_NO_SKILL).mean():5.1f}%")
+
+    yrs = m.loc[v.index, "n_pairs"] / 365.25
+    print(f"\n  paired record per gauge (years): median {yrs.median():.1f}, "
+          f"p05 {yrs.quantile(0.05):.1f}, p95 {yrs.quantile(0.95):.1f}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--vpu", type=int, default=714)
+    ap.add_argument("--start", default=DATE_START)
+    ap.add_argument("--end", default=DATE_END)
+    ap.add_argument("--min-years", type=float, default=1.0,
+                    help="minimum overlap between model and gauge")
+    ap.add_argument("--refresh", action="store_true",
+                    help="re-read the zarr instead of using the local cache")
+    ap.add_argument("--outdir", default=OUTPUT_DIR)
+    ap.add_argument("--data-dir", default=DATA_DIR,
+                    help="directory holding master_catalog_with_metadata.xlsx "
+                         "and routing/gauge_data/. Defaults to $GEOGLOWS_EVAL_DATA.")
+    ap.add_argument("--label", default=RUN_LABEL,
+                    help="name for this run, shown on the web page")
+    ap.add_argument("--warmup-years", type=int, default=0,
+                    help="drop this many years from the START of the model "
+                         "record before scoring, so spin-up from the assumed "
+                         "initial state is not evaluated")
+    ap.add_argument("--model-parquet", default=None,
+                    help="score this parquet of modelled discharge instead of "
+                         "the retrospective zarr: datetime index, one column "
+                         "per reach id. Sub-daily input is averaged to daily "
+                         "mean. Set --label to name it.")
+    args = ap.parse_args()
+
+    # Validated first: everything below either hits the network or takes minutes,
+    # and a wrong --data-dir should cost neither.
+    catalog, gauge_dir = data_paths(args.data_dir)
+
+    if args.start is None or args.end is None:
+        # Resolve the default window from whichever source is actually being
+        # scored, so --model-parquet neither reaches the network nor inherits
+        # the retrospective's dates.
+        if args.model_parquet:
+            first, last = parquet_period(args.model_parquet)
+            src = os.path.basename(args.model_parquet)
+        else:
+            first, last = model_period()
+            src = "the retrospective zarr"
+        args.start = args.start or first
+        args.end = args.end or last
+        print(f"window not given; using the full record of {src} "
+              f"{args.start} .. {args.end}")
+
+    os.makedirs(args.outdir, exist_ok=True)
+
+    gauges = build_gauge_table(args.vpu, catalog, gauge_dir)
+    if args.model_parquet:
+        model = model_q_from_parquet(args.model_parquet,
+                                     gauges["final_river_id"].to_numpy(),
+                                     args.start, args.end, args.vpu, args.refresh)
+    else:
+        model = fetch_model_q(gauges["final_river_id"].to_numpy(), args.start,
+                              args.end, args.vpu, args.refresh)
+
+    # Warm-up trim. A routing model starts from an assumed state, so its first
+    # months of output partly reflect that state rather than the forcing.
+    # Dropping the first --warmup-years removes them from the scoring.
+    #
+    # The trim happens HERE, after the fetch, not by moving --start forward. The
+    # cache is keyed on the requested window, so moving --start would name a
+    # cache that does not exist and re-read the source for nothing -- and every
+    # change to --warmup-years alone would pay for a fresh read.
+    #
+    # So args.start names the FETCH window while the array is being fetched, is
+    # saved into cache_start, and is then overwritten below with the evaluation
+    # start -- which is what run.json records as date_start and what labels the
+    # run everywhere downstream.
+    cache_start = args.start
+    if args.warmup_years < 0:
+        sys.exit(f"--warmup-years must be 0 or more, got {args.warmup_years}")
+    if args.warmup_years:
+        cut = model.index.min() + pd.DateOffset(years=args.warmup_years)
+        kept = model.index >= cut
+        if not kept.any():
+            sys.exit(f"--warmup-years {args.warmup_years} removes the whole record "
+                     f"({model.index.min().date()} .. {model.index.max().date()})")
+        model = model.loc[kept]
+        args.start = model.index.min().strftime("%Y-%m-%d")
+        print(f"      warm-up: dropped the first {args.warmup_years}y, "
+              f"scoring {args.start} .. {args.end} ({len(model):,} days)")
+
+    metrics = compute_metrics(gauges, model, args.min_years)
+
+    pq = os.path.join(args.outdir, f"vpu{args.vpu}_metrics.parquet")
+    print(f"[4/5] writing {len(metrics)} rows -> {pq}")
+    metrics.to_parquet(pq, index=False)
+
+    # Record the run configuration next to the parquet. serve.py and
+    # build_webapp.py read this rather than importing the module constants, so
+    # that a non-default --start/--end cannot leave them describing, or slicing
+    # to, a window the metrics were not computed over.
+    cfg = os.path.join(args.outdir, f"vpu{args.vpu}_run.json")
+    with open(cfg, "w", encoding="utf-8") as fh:
+        json.dump({
+            "vpu": args.vpu,
+            "label": args.label,
+            # date_start is the EVALUATION start, after any warm-up trim, and is
+            # what the page reports. cache_start is the window the model array
+            # was fetched over and names the cache file; build_webapp.py needs
+            # it to find the same array. They differ only when --warmup-years
+            # is used.
+            "date_start": args.start,
+            "date_end": args.end,
+            "cache_start": cache_start,
+            "warmup_years": args.warmup_years,
+            "min_years": args.min_years,
+            "n_gauges": int(len(metrics)),
+            "kge_col": KGE_COL,
+            "kge_label": KGE_LABEL,
+            "kge_no_skill": KGE_NO_SKILL,
+        }, fh, indent=2)
+    print(f"      run config -> {cfg}")
+
+    png = os.path.join(args.outdir, f"vpu{args.vpu}_kge_map.png")
+    plot_kge_map(metrics, args.vpu, png, args.start, args.end, args.label)
+
+    summarize(metrics)
+    print(f"\nwrote {pq}\nwrote {png}")
+
+
+if __name__ == "__main__":
+    main()

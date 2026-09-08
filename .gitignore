@@ -1,0 +1,21 @@
+# Model arrays, basemap and series caches. Regenerable, and large -- the VPU 714
+# full-record array alone is ~220 MB.
+cache/
+
+# Everything kge_map.py and build_webapp.py write: metric parquets, run configs,
+# static PNGs, and the built single-file pages. All reproducible from the scripts,
+# and a built page is 5-8 MB.
+outputs/
+outputs_*/
+
+# Local scratch
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Per-machine tool settings
+.claude/settings.local.json
+
+# Working notes, not part of the code
+ideas.docx
+*:Zone.Identifier
