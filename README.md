@@ -20,9 +20,11 @@ Two inputs the scripts do not fetch:
 
 Both live under one directory. **There is no default** — set `$GEOGLOWS_EVAL_DATA` or pass
 `--data-dir`. All three scripts check it before doing any other work, so a wrong path fails
-immediately rather than looking like missing gauge data.
+immediately rather than looking like missing gauge data. These are designed to be downloaded from
+the gauge data that we have on AWS. You must have them downloaded locally to be able to access them.
 
-The model side needs nothing prepared — the GEOGLOWS retrospective zarr is read from S3.
+The model side needs nothing prepared — the GEOGLOWS retrospective zarr is read from S3. Or it can
+read your own input.
 
 ## Running it
 
@@ -59,20 +61,7 @@ their numbers and both claim to be GEOGLOWS v2.
 | `ARCHITECTURE.md` | how the pieces connect and why — read before modifying anything |
 | `KNOWN_ISSUES.md` | data-quality problems, unconfirmed parameters, parked decisions |
 
-Nothing under `cache/` or `outputs*/` is committed — all of it is reproducible from the
-scripts, and a single built page is 5–8 MB.
-
 ## Reading the output
-
-Three things mislead people most often, repeated from the docstring:
-
-1. **KGE′, NSE and the ratios are unbounded below.** Worst values on VPU 714 are −151 and
-   −10,630. Never take a mean across gauges; use the median.
-2. **RMSE and MAE are not comparable between gauges** — RMSE correlates with drainage area at
-   Spearman +0.76, so a map of it is largely a map of river size. The normalised versions
-   trade that for a variability confound (+0.84 with observed CV).
-3. **The no-skill line is −0.41, not 0** (Knoben et al. 2019). Below it, the model is worse
-   than predicting the observed mean.
 
 Every metric is computed on **paired days only** — days where that gauge and the model both
 report — so every gauge has a different sample.
