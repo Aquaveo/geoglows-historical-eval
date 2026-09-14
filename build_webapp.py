@@ -28,8 +28,8 @@ import os
 import numpy as np
 import pandas as pd
 
-from kge_map import (CACHE_DIR, DATA_DIR, DATE_END, DATE_START, GAUGE_DIR,
-                     KGE_NO_SKILL, RUN_LABEL, data_paths, load_gauge_series)
+from kge_map import (CACHE_DIR, DATA_DIR, DATE_END, DATE_START, KGE_NO_SKILL,
+                     RUN_LABEL, data_paths, framing_bbox, load_gauge_series)
 
 # Exceedance probabilities (%) for the flow-duration curve. Denser in the tails,
 # because that is where the interesting model failures live.
@@ -70,7 +70,8 @@ def load_model_cache(vpu: int, start: str, end: str) -> pd.DataFrame:
     )
 
 
-def gauge_curves(metrics: pd.DataFrame, model: pd.DataFrame) -> dict:
+def gauge_curves(metrics: pd.DataFrame, model: pd.DataFrame,
+                 gauge_dir: str) -> dict:
     """Flow-duration curve and monthly regime per gauge, on the paired sample."""
     print(f"[2/4] computing curves for {len(metrics)} gauges")
     q_levels = [1.0 - p / 100.0 for p in FDC_EXCEED]  # exceedance -> quantile
@@ -79,7 +80,7 @@ def gauge_curves(metrics: pd.DataFrame, model: pd.DataFrame) -> dict:
     for i, row in enumerate(metrics.itertuples(index=False), start=1):
         if i % 500 == 0:
             print(f"      {i}/{len(metrics)}")
-        obs = load_gauge_series(os.path.join(GAUGE_DIR, row.fname))
+        obs = load_gauge_series(os.path.join(gauge_dir, row.fname))
         if obs is None or row.final_river_id not in model.columns:
             continue
         both = pd.concat([model[row.final_river_id].rename("sim"),
@@ -113,7 +114,12 @@ def basemap_paths(bbox: tuple[float, float, float, float]) -> dict:
 
     lon0, lat0, lon1, lat1 = bbox
     clip = box(lon0 - 2, lat0 - 2, lon1 + 2, lat1 + 2)
+    # "countries" is the one that tells you where on Earth you are. It was
+    # missing: admin_1 gives SUB-national boundaries only, so a VPU outside the
+    # handful of countries Natural Earth details at that level got nothing --
+    # VPU 208 rendered 0 admin_1 polylines and was left with bare coastline.
     layers = {
+        "countries": ("cultural", "admin_0_boundary_lines_land"),
         "states": ("cultural", "admin_1_states_provinces_lakes"),
         "coast": ("physical", "coastline"),
         "lakes": ("physical", "lakes"),
@@ -172,11 +178,16 @@ def main() -> None:
     # naming a different run than the metrics came from. Passing it renames the
     # page without recomputing anything.
     ap.add_argument("--label", default=None)
+    ap.add_argument("--data-dir", default=DATA_DIR,
+                    help="directory holding master_catalog_with_metadata.xlsx "
+                         "and routing/gauge_data/. Defaults to $GEOGLOWS_EVAL_DATA.")
     args = ap.parse_args()
 
     # Same reason as serve.py: the curves are built from the gauge CSVs, and a
     # wrong data dir would quietly produce a page with no observed curves at all.
-    data_paths(DATA_DIR)
+    # Take the resolved gauge_dir rather than the module-level GAUGE_DIR, which
+    # was fixed from the environment at import time and cannot see --data-dir.
+    _, gauge_dir = data_paths(args.data_dir)
 
     metrics_path = args.metrics or f"outputs/vpu{args.vpu}_metrics.parquet"
     out_path = args.out or f"outputs/vpu{args.vpu}_explorer.html"
@@ -217,10 +228,13 @@ def main() -> None:
     if len(model) != before:
         print(f"      warm-up trim: {before - len(model)} days dropped, "
               f"{len(model)} scored from {args.start}")
-    curves = gauge_curves(m, model)
+    curves = gauge_curves(m, model, gauge_dir)
 
-    bbox = (float(m.longitude.min()), float(m.latitude.min()),
-            float(m.longitude.max()), float(m.latitude.max()))
+    *bbox, n_outside = framing_bbox(m.longitude, m.latitude)
+    bbox = tuple(bbox)
+    if n_outside:
+        print(f"      {n_outside} gauges fall outside the framed area and are "
+              f"drawn but do not set the view")
     base = basemap_paths(bbox)
 
     gauges = []
@@ -254,6 +268,7 @@ def main() -> None:
         "noSkill": KGE_NO_SKILL,
         "fdcExceed": FDC_EXCEED,
         "bbox": [r4(v) for v in bbox],
+        "nOutside": n_outside,
         "gauges": gauges,
         "curves": curves,
         "basemap": base,

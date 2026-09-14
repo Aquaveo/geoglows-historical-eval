@@ -28,9 +28,17 @@ read your own input.
 
 ## Running it
 
+Set the data directory once, so every script finds it in this and future shells:
+
+```bash
+echo 'export GEOGLOWS_EVAL_DATA=/path/to/your/gauge/data' >> ~/.bashrc && source ~/.bashrc
+```
+
+`export` on its own only lasts for the current terminal. Every script also takes
+`--data-dir` if you would rather pass it explicitly.
+
 ```bash
 conda env create -f environment.yml && conda activate geoglows-eval
-export GEOGLOWS_EVAL_DATA=/path/to/your/gauge/data
 
 python kge_map.py --vpu 714          # metrics + run config + static map
 python build_webapp.py --vpu 714     # one self-contained HTML page

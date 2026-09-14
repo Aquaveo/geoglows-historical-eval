@@ -161,7 +161,7 @@ input[type="range"] { width: 116px; cursor: pointer; }
 
 .sumctl { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
 
-table.grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.grid { width: 100%; border-collapse: collapse; font-size: var(--grid-size, 13px); }
 table.grid th {
   text-align: right; font-size: 10px; font-weight: 600; letter-spacing: .06em;
   text-transform: uppercase; color: var(--ink-3); white-space: nowrap;
@@ -249,9 +249,16 @@ select.wants-input { border-color: var(--accent); background: var(--accent-sf); 
 }
 #lgbar { display: block; border-radius: 2px; }
 .lgticks {
-  display: flex; justify-content: space-between; margin-top: 3px;
+  /* Absolutely positioned, because the ticks have to sit at the fraction of the
+     bar they actually name. With flex space-between and labels of unequal width
+     the middle tick's centre lands at W/2 + (w_first - w_last)/2, i.e. pointing
+     at the wrong colour. */
+  position: relative; height: 13px; margin-top: 3px;
   font-size: 10.5px; color: var(--ink-2);
 }
+.lgticks .num { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.lgticks .num.t0   { left: 0; transform: none; }
+.lgticks .num.t100 { right: 0; left: auto; transform: none; }
 .lgnote { margin-top: 5px; font-size: 10.5px; color: var(--ink-3); }
 
 .zoomers { position: absolute; right: 14px; top: 14px; display: flex; flex-direction: column; gap: 5px; }
@@ -281,6 +288,7 @@ select.wants-input { border-color: var(--accent); background: var(--accent-sf); 
 }
 @media (max-width: 900px) { .rail { border-left: none; border-top: 1px solid var(--rule); } }
 
+.rail .eyebrow, .rail h2 { font-size: inherit; }
 .rail h2 {
   margin: 0 0 2px; font-size: 16px; font-weight: 600; letter-spacing: -.01em;
   text-wrap: balance;
@@ -309,7 +317,8 @@ select.wants-input { border-color: var(--accent); background: var(--accent-sf); 
 .verdict .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
 table.kv { width: 100%; border-collapse: collapse; }
-table.kv td { padding: 3.5px 0; font-size: 12.5px; vertical-align: baseline; }
+table.kv td { padding: var(--kv-pad, 4.5px) 0; font-size: var(--kv-size, 14px);
+               vertical-align: baseline; }
 table.kv td:first-child { color: var(--ink-2); }
 table.kv td:last-child { text-align: right; font-weight: 500; }
 table.kv tr + tr td { border-top: 1px solid var(--rule); }
@@ -412,6 +421,7 @@ svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
 
     <div class="ctl" id="filtCtl">
       <button class="chip" id="onlyBad" aria-pressed="false">Below no-skill only</button>
+      <button class="chip" id="showStreams" aria-pressed="true">Rivers</button>
       <button class="linkbtn" id="reset">Reset</button>
     </div>
   </div>
@@ -432,7 +442,7 @@ svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
       <div class="legend">
         <div class="lab" id="lgLab"></div>
         <canvas id="lgbar" width="220" height="11"></canvas>
-        <div class="lgticks"><span class="num" id="lgLo"></span><span class="num" id="lgMid"></span><span class="num" id="lgHi"></span></div>
+        <div class="lgticks" id="lgTicks"></div>
         <div class="lgnote" id="lgNote"></div>
       </div>
       <div id="tip" class="num"></div>
@@ -477,44 +487,100 @@ const LIVE = !EMBEDDED;
 
 /* ---- metric definitions -------------------------------------------------- */
 const METRICS = [
-  {k:"kge_2012",    n:"KGE' (Kling 2012)",          dv:0, lo:-1, hi:1,   opt:1, dec:2},
+  {k:"kge_2012",    n:"KGE' (Kling 2012)",       dvNoSkill:1, lo:-1, hi:0.85, opt:1, dec:2},
+  // dv is set from the payload's noSkill at load time, so the grey midpoint
+  // sits on the actual break-even value rather than on 0. KGE' is the only
+  // metric here whose benchmark is not 0 -- NSE and ss_clim really do break
+  // even at 0, so they keep dv:0 and are meant to look different.
   {k:"ss_clim",     n:"Skill vs climatology"      , dv:0, lo:-1, hi:1,   opt:1, dec:2},
   {k:"nse",         n:"NSE",                        dv:0, lo:-1, hi:1,   opt:1, dec:2},
   {k:"r",           n:"Pearson r",                  dv:0, lo:-1, hi:1,   opt:1, dec:2},
   {k:"spearman",    n:"Spearman ρ",                 dv:0, lo:-1, hi:1,   opt:1, dec:2},
+  // lo stays at the theoretical -1 rather than being narrowed to the range the
+  // WHOLE-RECORD values happen to occupy. Narrowing gains nothing anyway -- in a
+  // diverging scale lo only affects the negative arm, and these are positive at
+  // 99.8% of gauges -- while it would clip the MONTHLY values, which reach -0.52.
+  // The summary tab groups by month off the same lo, so clipping there would make
+  // the monthly and annual views disagree about the same gauge.
   {k:"gamma",       n:"Gamma (CV ratio)",           dv:1, lo:0,  hi:2,   opt:1, dec:2},
   {k:"alpha",       n:"Alpha (σ ratio)",            dv:1, lo:0,  hi:2,   opt:1, dec:2},
   {k:"beta",        n:"Beta (bias ratio)",          dv:1, lo:0,  hi:2,   opt:1, dec:2},
   {k:"pbias_pct",   n:"PBIAS (%)",                  dv:0, lo:-100,hi:100,opt:0, dec:1},
-  {k:"pod",         n:"POD (detection)",           dv:0, lo:0,  hi:1,   opt:1, dec:2},
-  {k:"far",         n:"FAR (false alarms)",        seq:1, lo:0, hi:1,   opt:0, dec:2},
-  {k:"csi",         n:"CSI (threat score)",        dv:0, lo:0,  hi:1,   opt:1, dec:2},
-  {k:"ets",         n:"ETS (equitable threat)",    dv:0, lo:-0.5,hi:1,  opt:1, dec:2},
+  {k:"pod",         n:"POD (detection)",           seq:1, pal:"purple", sqrt:1, lo:0, hi:1, opt:1, dec:2},
+  {k:"far",         n:"FAR (false alarms)",        seq:1, pal:"heat", lo:0, hi:1, opt:0, dec:2},
+  {k:"csi",         n:"CSI (threat score)",        seq:1, pal:"purple", sqrt:1, lo:0, hi:1, opt:1, dec:2},
+  {k:"ets",         n:"ETS (equitable threat)",    seq:1, pal:"purple", sqrt:1, lo:0, hi:1, opt:1, dec:2},
   {k:"freq_bias",   n:"Frequency bias",            dv:1, lo:0,  hi:2,   opt:1, dec:2},
-  {k:"nrmse",       n:"NRMSE (÷ mean flow)",        seq:1, log:1, opt:0, dec:2},
-  {k:"mae_rel",     n:"MAE ÷ mean flow",            seq:1, lo:0, hi:3,   opt:0, dec:2},
+  {k:"nrmse",       n:"NRMSE (÷ mean flow)",        seq:1, pal:"heat", log:1, lo:0.5, hi:20, opt:0, dec:2},
+  {k:"mae_rel",     n:"MAE ÷ mean flow",            seq:1, pal:"heat", lo:0, hi:3, opt:0, dec:2},
 ];
 const M = Object.fromEntries(METRICS.map(m => [m.k, m]));
 
 /* ---- colour -------------------------------------------------------------- */
-const RAMP_LIGHT = ["#661a1a","#8f2424","#b52f2f","#d03b3b","#dd625b","#ea8a84",
+// Diverging: ORANGE <-> BLUE, warm/cool poles with a neutral gray midpoint.
+//
+// This replaced red<->blue for two measured reasons. The old blue arm carried
+// three near-identical steps (#3987e5, #2a78d6, #256abf) and its worst adjacent
+// pair separated by only dE 4.7 -- below even the dE 6 floor -- so high KGE'
+// values were not distinguishable from each other. And of the four candidate
+// pairs tested, only orange<->blue clears dE 8 under protanopia as well as
+// normal vision; orange<->teal and brown<->teal both collapse to 6.0, because
+// teal and orange converge for protanopes.
+//
+// Measured: light 8.5 normal / 8.3 protan / 8.8 deutan.
+//           dark  8.5 normal / 7.5 protan / 8.8 deutan.
+const RAMP_LIGHT = ["#6b2915","#9c3d20","#c9512a","#eb6834","#f2a37e",
                     "#f0efec",
-                    "#6da7ec","#3987e5","#2a78d6","#256abf","#184f95","#0d366b"];
-const RAMP_DARK  = ["#ffb3ac","#f58e85","#e5675e","#cf4a43","#9e3833","#6b2724",
+                    "#b7d3f6","#6da7ec","#3987e5","#256abf","#0d366b"];
+const RAMP_DARK  = ["#f7c9b3","#f2a37e","#eb6834","#c9512a","#9c3d20",
                     "#383835",
-                    "#1c4370","#20558f","#2a6db8","#3987e5","#6da7ec","#9ec5f4"];
+                    "#20558f","#3987e5","#6da7ec","#9ec5f4","#cde2fb"];
 const SEQ_LIGHT  = ["#fbeceb","#f8d6d3","#f2b8b3","#ea9089","#dd6a61","#cf4a43",
                     "#b52f2f","#8f2424","#661a1a"];
 const SEQ_DARK   = ["#3a2422","#5c2b28","#7d3330","#9e3833","#c04740","#dd6a61",
                     "#ea9089","#f2b8b3","#fbeceb"];
 
-let RAMP = RAMP_LIGHT, SEQ = SEQ_LIGHT;
+// Heat, for metrics where HIGH IS BAD (error magnitudes, false alarms). Multi-hue,
+// which is normally wrong for a magnitude ramp, but permitted as "semantic heat"
+// because lightness is strictly monotonic, so it still reads as ordered in
+// greyscale and under colour-vision deficiency.
+//
+// EVERY STEP CLEARS 2:1 AGAINST ITS SURFACE. The first version started at cream
+// (#fdf3d6, 1.08:1) and faded into the page. That is normally allowed for a
+// continuous ramp, where the palest step means "near zero, nothing here" -- but
+// these metrics are not distributed that way, so the invisible end was where much
+// of the data sat. Measured: light 10.0/6.8/9.3, dark 8.5/8.4/8.4
+// (normal/protan/deutan).
+const HEAT_LIGHT = ["#eda100","#eb6834","#d03b3b","#a52630","#6e1a24"];
+const HEAT_DARK  = ["#7d2028","#c9512a","#eb6834","#f6c94f","#fbe3a0"];
+// Blue, for bounded scores where HIGH IS GOOD (POD, CSI). Single hue, dark mode
+// reversed so high values stay light against the dark surface.
+//
+// Starts at #86b6ef (2.06:1), the palest documented step that is still visible on
+// the light surface -- NOT at the palest step available. 81% of POD gauges and 98%
+// of CSI gauges fall in the bottom quarter of the 0..1 scale, so the pale end
+// carries most of the data rather than the empty tail, and anything under 2:1
+// there is simply unreadable. Measured: light 9.8/9.6/9.4, dark 10.0/9.4/10.6.
+// Purple, for the flood-detection scores (POD, CSI, ETS). Chosen over blue and
+// teal on two counts: every step clears 3.05:1 on the light surface where teal's
+// palest is 2.24:1, and min adjacent dE is 11.1 in both modes against blue's 9.8
+// -- and purple is the one hue here that cannot be confused with either arm of
+// the orange<->blue diverging ramp or with heat.
+const PURP_LIGHT = ["#9085e9","#6f5fd8","#4a3aa7","#2e2470"];
+const PURP_DARK  = ["#4a3aa7","#6f5fd8","#9085e9","#c9c3f4"];
+const SEQB_LIGHT = ["#86b6ef","#5598e7","#2a78d6","#184f95","#0d366b"];
+const SEQB_DARK  = ["#184f95","#2a78d6","#6da7ec","#9ec5f4","#cde2fb"];
+
+let RAMP = RAMP_LIGHT, SEQ = SEQ_LIGHT, HEAT = HEAT_LIGHT, SEQB = SEQB_LIGHT, PURP = PURP_LIGHT;
 const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const themeMode = () => (cssVar("--ramp-mode") || "").replace(/["'\s]/g, "") === "dark" ? "dark" : "light";
 function syncRamp() {
   const d = themeMode() === "dark";
   RAMP = d ? RAMP_DARK : RAMP_LIGHT;
   SEQ  = d ? SEQ_DARK  : SEQ_LIGHT;
+  HEAT = d ? HEAT_DARK : HEAT_LIGHT;
+  SEQB = d ? SEQB_DARK : SEQB_LIGHT;
+  PURP = d ? PURP_DARK : PURP_LIGHT;
 }
 const hex2rgb = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
 function interp(stops, t) {
@@ -528,16 +594,34 @@ function scalePos(m, v) {
   if (m.seq) {
     if (m.log) { const lo = Math.log10(m.lo), hi = Math.log10(m.hi);
       return v > 0 ? (Math.log10(v) - lo) / (hi - lo) : 0; }
+    // sqrt for scores that are bounded [0,1] but pile up near the floor: POD's
+    // interquartile range is 0.078-0.224 and CSI's is 0.049-0.130, so a linear
+    // scale renders three gauges in four as the same colour. sqrt widens the
+    // interquartile colour spread by 1.3x (POD) to 1.7x (CSI, ETS). It is a
+    // fixed transform, not fitted to the data, so runs stay comparable.
+    if (m.sqrt) {
+      const f = Math.max(0, (v - m.lo) / (m.hi - m.lo));
+      return Math.sqrt(f);
+    }
     return (v - m.lo) / (m.hi - m.lo);
   }
   const c = m.dv;
   return v >= c ? 0.5 + 0.5 * Math.min(1, (v - c) / (m.hi - c))
                 : 0.5 - 0.5 * Math.min(1, (c - v) / (c - m.lo));
 }
+// Which ramp a metric draws from. Palettes are assigned per metric by what the
+// number means, not chosen by the viewer: diverging where there is a meaningful
+// centre, heat where high is bad, blue where high is good. "Blue is good, hot is
+// bad" then holds across every metric on the map.
+function rampFor(m) {
+  if (!m.seq) return RAMP;
+  return m.pal === "heat" ? HEAT : m.pal === "blue" ? SEQB
+       : m.pal === "purple" ? PURP : SEQ;
+}
 function colorFor(m, v) {
   if (v == null || !isFinite(v)) return null;
   const t = Math.max(0, Math.min(1, scalePos(m, v)));
-  return m.seq ? interp(SEQ, t) : interp(RAMP, t);
+  return interp(rampFor(m), t);
 }
 
 /* ---- state --------------------------------------------------------------- */
@@ -604,22 +688,116 @@ function drawLines(lines, stroke, width) {
   ctx.stroke();
 }
 
+/* ---- GEOGLOWS stream network overlay ------------------------------------- */
+// Loaded straight from the published ArcGIS service as a transparent PNG. It is
+// a DYNAMIC map service, not a tile cache, so it will render any bounding box in
+// any spatial reference -- asking for EPSG:4326 gives an image that is linear in
+// lon/lat, which is exactly what px()/py() are, so it aligns with no reprojection.
+//
+// It is the same TDX-Hydro network the model runs on, so the streams correspond
+// to the reaches being scored rather than to some other hydrography.
+//
+// Requested per view rather than embedded once: it stays sharp at every zoom and
+// costs the page nothing. The trade-off is that it needs network access, so a
+// page opened offline simply shows no streams -- everything else still works.
+const STREAM_URL = "https://livefeeds3.arcgis.com/arcgis/rest/services/" +
+                   "GEOGLOWS/GlobalWaterModel_Medium/MapServer/export";
+const SV = { img: null, box: null, pending: null, on: true, timer: 0 };
+
+// The lon/lat window currently on screen, inverted from px()/py().
+function viewBounds() {
+  const lon = x => ((x - view.tx) / view.s - ox) / (KX * base);
+  const lat = y => (oy - (y - view.ty) / view.s) / base;
+  return [lon(0), lat(H), lon(W), lat(0)];
+}
+
+function requestStreams() {
+  if (!SV.on || !D || W < 2 || H < 2) return;
+  const b = viewBounds();
+  const key = b.map(v => v.toFixed(4)).join(",");
+  if (SV.pending === key || (SV.box && SV.box.key === key)) return;
+  SV.pending = key;
+  // THE REQUESTED PIXEL SIZE MUST MATCH THE BBOX'S ASPECT RATIO IN DEGREES, not
+  // the canvas aspect ratio. If they disagree, ArcGIS silently EXPANDS the bbox
+  // to fit the image and returns no metadata saying so with f=image -- measured:
+  // asking for a 34.8 x 20.3 degree box at 1200x916 came back covering 26.564
+  // degrees of latitude instead of 20.300. Drawing that into the requested
+  // rectangle is what made the rivers drift against the gauges under zoom.
+  //
+  // px() compresses longitude by KX, so this map's degrees-per-pixel is
+  // 1/(KX*base*s) in x and 1/(base*s) in y: the box spans (W/KX) x H "degree
+  // pixels". Requesting that shape keeps the bbox exact, and drawing the wider
+  // image into the W-wide screen rect squashes it by KX -- which IS the projection.
+  let rw = W / KX, rh = H;
+  if (rw > 2048 || rh > 2048) { const k = Math.min(2048 / rw, 2048 / rh); rw *= k; rh *= k; }
+  const q = new URLSearchParams({
+    bbox: b.join(","), bboxSR: "4326", imageSR: "4326",
+    size: Math.round(rw) + "," + Math.round(rh),
+    format: "png32", transparent: "true", f: "image",
+    // Only this VPU's reaches. The service layer carries a `vpu` field, so a
+    // definition query drops every neighbouring basin -- without it the map
+    // shows rivers running through areas this page has no gauges for and makes
+    // no claim about. Driven by the payload, so each page filters to its own VPU.
+    layerDefs: JSON.stringify({ "0": "vpu=" + D.vpu }),
+  });
+  const im = new Image();
+  // No crossOrigin: nothing reads the canvas back (no getImageData/toDataURL), so
+  // the image never needs to be untainted -- and requesting CORS would make the
+  // load fail outright from file://, where the Origin is null.
+  im.onload = () => {
+    if (SV.pending !== key) return;         // a newer view already superseded it
+    SV.pending = null; SV.img = im; SV.box = { key, b }; draw();
+  };
+  // Offline, blocked, or the service down: leave the map as it was and stop
+  // retrying this view. Nothing else on the page depends on it.
+  im.onerror = () => { if (SV.pending === key) SV.pending = null; };
+  im.src = STREAM_URL + "?" + q.toString();
+}
+
+// Debounced, because a drag fires continuously and each view is a fresh request.
+function scheduleStreams() {
+  clearTimeout(SV.timer);
+  SV.timer = setTimeout(requestStreams, 220);
+}
+
+function drawStreams() {
+  if (!SV.on || !SV.img || !SV.box) return;
+  const [lon0, lat0, lon1, lat1] = SV.box.b;
+  const x = px(lon0), y = py(lat1), w = px(lon1) - x, h = py(lat0) - y;
+  if (!(w > 0 && h > 0)) return;
+  ctx.save();
+  ctx.globalAlpha = 0.55;                   // a reference layer, not the subject
+  ctx.drawImage(SV.img, x, y, w, h);
+  ctx.restore();
+}
+
 function draw() {
   if (!D) return;
   const vis = needsMonth() ? [] : visible(), m = M[S.metric];
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = cssVar("--land"); ctx.fillRect(0,0,W,H);
   const bm = D.basemap || {};
-  drawLines(bm.lakes,  cssVar("--rule"),   0.8);
-  drawLines(bm.states, cssVar("--rule-2"), 0.7);
-  drawLines(bm.coast,  cssVar("--ink-3"),  0.9);
+  drawLines(bm.lakes,     cssVar("--rule"),   0.8);
+  drawLines(bm.states,    cssVar("--rule-2"), 0.7);
+  // Country borders heavier than sub-national ones and drawn after them, so the
+  // international boundary reads as the stronger line where the two coincide.
+  drawLines(bm.countries, cssVar("--ink-3"),  1.1);
+  drawLines(bm.coast,     cssVar("--ink-3"),  0.9);
+  drawStreams();
 
   // Best first, so the WORST gauges land on top. Last drawn wins, and hiding
   // poor gauges under good ones would flatter the model where it matters most.
   const order = vis.slice().sort((a,b) =>
     Math.abs(mval(a)-m.opt) - Math.abs(mval(b)-m.opt));
   const rad = Math.max(2.6, Math.min(6, 3.4*Math.sqrt(view.s)));
-  const ring = cssVar("--panel");
+  // A hairline in muted ink, NOT in the surface colour. The ring's first job is
+  // separating overlapping markers, which a surface-coloured stroke does -- but
+  // it also made every pale fill invisible, because the marker then had a
+  // background-coloured fill inside a background-coloured outline. That hit all
+  // ten diverging metrics, whose grey midpoint is 1.12:1 against the surface, so
+  // any gauge near the centre of the scale simply vanished. An ink hairline does
+  // both jobs and leaves the ramps alone.
+  const ring = cssVar("--ink-3");
   for (const g of order) {
     const c = colorFor(m, mval(g)); if (!c) continue;
     ctx.beginPath(); ctx.arc(px(g.lon), py(g.lat), rad, 0, 6.2832);
@@ -1033,6 +1211,9 @@ function renderSummary() {
       the model both have data, so the paired record differs per gauge. Metric window
       <code>${D.window[0]}</code> to <code>${D.window[1]}</code>; plotted series show the
       full available record.
+      ${D.nOutside ? `<br>${D.nOutside} gauge${D.nOutside===1?"":"s"} lie outside the framed
+      area -- almost certainly bad coordinates in the catalog -- and are drawn but do not
+      set the initial view.` : ""}
     </div>`;
   rail.appendChild(wrap);
   wrap.querySelector("#ec").appendChild(ecdfChart(vals, null));
@@ -1279,18 +1460,53 @@ function renderLegend() {
   const c = document.getElementById("lgbar"), g = c.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
   c.width = 220*dpr; c.height = 11*dpr; g.setTransform(dpr,0,0,dpr,0,0);
-  for (let x=0;x<220;x++) { g.fillStyle = m.seq ? interp(SEQ,x/219) : interp(RAMP,x/219);
+  for (let x=0;x<220;x++) { g.fillStyle = interp(rampFor(m), x/219);
     g.fillRect(x,0,1,11); }
-  const f = v => m.log ? sig(v) : String(v);
-  document.getElementById("lgLo").textContent = f(m.lo);
-  document.getElementById("lgMid").textContent = m.seq
-    ? f(m.log ? Math.sqrt(m.lo*m.hi) : (m.lo+m.hi)/2) : String(m.dv);
-  document.getElementById("lgHi").textContent = f(m.hi);
+  // Five ticks, each placed at the fraction of the bar it names, with its value
+  // obtained by INVERTING the transform the bar was drawn with. Three evenly
+  // spaced ticks invited the reader to interpolate linearly, which is wrong for
+  // every scale here: a diverging ramp gives each arm half the bar regardless of
+  // how much value each arm covers, and the log and sqrt ramps are not linear at
+  // all. KGE' showed -1, -0.41, 0.85 evenly spaced, so the axis looked broken --
+  // -0.41 is nowhere near the arithmetic midpoint of -1 and 0.85.
+  const valueAt = t => {
+    if (m.seq) {
+      if (m.log)  { const a = Math.log10(m.lo), b = Math.log10(m.hi);
+                    return Math.pow(10, a + t * (b - a)); }
+      if (m.sqrt) return m.lo + t * t * (m.hi - m.lo);
+      return m.lo + t * (m.hi - m.lo);
+    }
+    const c = m.dv;
+    return t >= 0.5 ? c + (t - 0.5) * 2 * (m.hi - c)
+                    : c - (0.5 - t) * 2 * (c - m.lo);
+  };
+  const f = v => m.log || m.sqrt || Math.abs(v) < 1e-9 || Number.isInteger(v)
+               ? sig(v) : String(Number(v.toFixed(2)));
+  const ticks = document.getElementById("lgTicks");
+  ticks.innerHTML = "";
+  [0, 0.25, 0.5, 0.75, 1].forEach(t => {
+    const sp = document.createElement("span");
+    sp.className = "num" + (t === 0 ? " t0" : t === 1 ? " t100" : "");
+    if (t > 0 && t < 1) sp.style.left = (t * 100) + "%";
+    sp.textContent = f(valueAt(t));
+    ticks.appendChild(sp);
+  });
   const notes = [];
   if (m.k.startsWith("kge")) notes.push(`no skill at ${D.noSkill}`);
-  if (m.log) notes.push("log scale, 5th–95th percentile");
-  if (m.seq) notes.push("deeper red = larger error");
-  notes.push("beyond the ends is clipped");
+  if (m.log) notes.push("log scale");
+  if (m.sqrt) notes.push("square-root scale");
+  if (m.seq) notes.push(m.pal === "purple" ? "deeper purple = better"
+                        : m.pal === "blue" ? "deeper blue = better"
+                        : m.pal === "heat" ? "hotter = worse" : "deeper red = larger error");
+  // Count the gauges that really are off the ends rather than warning about it
+  // unconditionally. POD, CSI and ETS are bounded [0,1] and scaled 0..1, so
+  // nothing can be outside -- the old note was noise there and hid the cases
+  // where clipping is real, like the 46 gauges above the nrmse ceiling.
+  const nOut = D.gauges.reduce((n, g) => {
+    const v = g[m.k];
+    return n + (v != null && isFinite(v) && (v < m.lo || v > m.hi) ? 1 : 0);
+  }, 0);
+  if (nOut) notes.push(`${nOut.toLocaleString()} gauge${nOut===1?"":"s"} beyond the ends, drawn at the limit`);
   document.getElementById("lgNote").textContent = notes.join(" · ");
 }
 
@@ -1323,7 +1539,7 @@ cv.addEventListener("pointerup", e => {
     S.sel = (g && g === S.sel) ? null : g;
     renderRail();
   }
-  drag = null; cv.classList.remove("drag"); draw();
+  drag = null; cv.classList.remove("drag"); draw(); scheduleStreams();
 });
 cv.addEventListener("pointercancel", () => { drag=null; cv.classList.remove("drag"); });
 cv.addEventListener("pointerleave", () => { tip.classList.remove("on");
@@ -1332,16 +1548,17 @@ cv.addEventListener("wheel", e => {
   e.preventDefault();
   const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
   const ns = Math.max(1, Math.min(40, view.s*Math.exp(-e.deltaY*0.0016))), f = ns/view.s;
-  view.tx = mx-(mx-view.tx)*f; view.ty = my-(my-view.ty)*f; view.s = ns; draw();
+  view.tx = mx-(mx-view.tx)*f; view.ty = my-(my-view.ty)*f; view.s = ns; draw(); scheduleStreams();
 }, {passive:false});
 
 function zoomBy(k) {
   const ns = Math.max(1, Math.min(40, view.s*k)), f = ns/view.s;
   view.tx = W/2-(W/2-view.tx)*f; view.ty = H/2-(H/2-view.ty)*f; view.s = ns; draw();
+  scheduleStreams();
 }
 document.getElementById("zin").onclick  = () => zoomBy(1.45);
 document.getElementById("zout").onclick = () => zoomBy(1/1.45);
-document.getElementById("zfit").onclick = () => { view.s=1; view.tx=0; view.ty=0; draw(); };
+document.getElementById("zfit").onclick = () => { view.s=1; view.tx=0; view.ty=0; draw(); scheduleStreams(); };
 
 
 
@@ -1617,6 +1834,11 @@ function renderSummaryTab() {
   const withSkill = kge.filter(v => v != null && v >= D.noSkill).length;
   const beatClim = gs.filter(g => g.ss_clim != null && g.ss_clim > 0).length;
   const nClim = gs.filter(g => g.ss_clim != null).length;
+  // The MAE-based version of the same comparison. Reported alongside because the
+  // two disagree at 13% of gauges on VPU 714 -- 53.8% beat climatology on squared
+  // error, 62.4% on absolute error -- so "beats climatology" is not one number.
+  const beatClimMae = gs.filter(g => g.ss_clim_mae != null && g.ss_clim_mae > 0).length;
+  const nClimMae = gs.filter(g => g.ss_clim_mae != null).length;
   const rows = summaryRows(), m = sumMetric();
   const grp = GROUPINGS.find(g => g.k === SUM.group);
 
@@ -1638,12 +1860,17 @@ function renderSummaryTab() {
           <div class="tile"><span class="k">Median KGE'</span>
             <span class="v num">${fmt(median(kge))}</span>
             <span class="sub">no-skill line at ${D.noSkill}</span></div>
-          <div class="tile"><span class="k">Have skill</span>
+          <div class="tile"><span class="k">Beat a flat average</span>
             <span class="v num">${(100 * withSkill / gs.length).toFixed(0)}%</span>
-            <span class="sub">${withSkill.toLocaleString()} gauges above ${D.noSkill}</span></div>
-          <div class="tile"><span class="k">Beat climatology</span>
+            <span class="sub">${withSkill.toLocaleString()} of ${gs.length.toLocaleString()} gauges beat
+              one constant number &#8212; the gauge's own mean flow, every day.
+              KGE&#8242; &#8805; ${D.noSkill}</span></div>
+          <div class="tile"><span class="k">Beat a seasonal average</span>
             <span class="v num">${nClim ? (100 * beatClim / nClim).toFixed(0) : "—"}%</span>
-            <span class="sub">vs the gauge's own seasonal cycle</span></div>
+            <span class="sub">${beatClim.toLocaleString()} of ${nClim.toLocaleString()} gauges beat
+              that calendar day's own average &#8212; a harder test, so the number is lower.
+              Squared error; ${nClimMae ? (100 * beatClimMae / nClimMae).toFixed(0) : "—"}% on
+              absolute error</span></div>
           <div class="tile"><span class="k">Median r</span>
             <span class="v num">${fmt(median(gs.map(g => g.r)))}</span>
             <span class="sub">&#947; ${fmt(median(gs.map(g => g.gamma)))} &#183;
@@ -1757,7 +1984,7 @@ function showTab(which) {
   document.getElementById("tabMap").setAttribute("aria-pressed", String(isMap));
   document.getElementById("tabSum").setAttribute("aria-pressed", String(!isMap));
   // The map canvas has no size while hidden, so it must be re-measured on return.
-  if (isMap) { fit(); draw(); drawHydro(); } else { renderSummaryTab(); }
+  if (isMap) { fit(); draw(); drawHydro(); scheduleStreams(); } else { renderSummaryTab(); }
 }
 
 /* ---- resizable rail ------------------------------------------------------ */
@@ -1765,12 +1992,27 @@ function showTab(which) {
 // try/catch because localStorage throws outright in some embedding contexts.
 const RAIL_MIN = 300, RAIL_MAX_FRAC = 0.72, RAIL_KEY = "gse.railWidth";
 
+// Metric text tracks the panel width. At RAIL_MIN the tables are as tight as
+// they were; widening the panel spends the space on legibility rather than on
+// more whitespace. Linear between the two anchors and clamped at both ends, so
+// a very wide panel does not end up with headline-sized numbers.
+const KV_MIN = 14, KV_MAX = 19, GRID_MIN = 13, GRID_MAX = 16, RAIL_WIDE = 760;
+function scaleRailText(w) {
+  const t = Math.max(0, Math.min(1, (w - RAIL_MIN) / (RAIL_WIDE - RAIL_MIN)));
+  const kv = KV_MIN + t * (KV_MAX - KV_MIN);
+  const st = document.documentElement.style;
+  st.setProperty("--kv-size", kv.toFixed(2) + "px");
+  st.setProperty("--kv-pad", (4.5 + t * 2.5).toFixed(2) + "px");
+  st.setProperty("--grid-size", (GRID_MIN + t * (GRID_MAX - GRID_MIN)).toFixed(2) + "px");
+}
+
 function setRailWidth(w, persist) {
   const max = Math.max(RAIL_MIN, Math.round(window.innerWidth * RAIL_MAX_FRAC));
   w = Math.max(RAIL_MIN, Math.min(max, Math.round(w)));
   document.documentElement.style.setProperty("--rail-w", w + "px");
+  scaleRailText(w);
   if (persist) { try { localStorage.setItem(RAIL_KEY, String(w)); } catch (e) {} }
-  fit(); draw(); drawHydro();
+  fit(); draw(); drawHydro(); requestStreams();
   return w;
 }
 
@@ -1778,6 +2020,7 @@ function setRailWidth(w, persist) {
   let saved = null;
   try { saved = localStorage.getItem(RAIL_KEY); } catch (e) {}
   if (saved && isFinite(+saved)) setRailWidth(+saved, false);
+  else scaleRailText(parseFloat(cssVar("--rail-w")) || RAIL_MIN);
 
   const gut = document.getElementById("gutter");
   if (!gut) return;
@@ -1832,7 +2075,13 @@ async function boot() {
 
   const pctl = (a,p) => { const v = a.filter(x=>x!=null&&isFinite(x)&&x>0).sort((x,y)=>x-y);
     return v.length ? v[Math.min(v.length-1, Math.floor(p*(v.length-1)))] : null; };
-  for (const m of METRICS) if (m.log) {
+  // Only for a log metric that declares no bounds. Deriving them from the data
+  // makes the same value a different colour on every run, which quietly breaks
+  // comparison between two pages -- the whole point of labelling runs. nrmse
+  // therefore carries fixed lo/hi and does not come through here.
+  // Metrics whose neutral point is the run's no-skill line, not zero.
+  for (const m of METRICS) if (m.dvNoSkill) m.dv = D.noSkill;
+  for (const m of METRICS) if (m.log && m.lo == null) {
     m.lo = pctl(D.gauges.map(g=>g[m.k]), 0.05) ?? 0.01;
     m.hi = pctl(D.gauges.map(g=>g[m.k]), 0.95) ?? 100;
   }
@@ -1872,6 +2121,11 @@ async function boot() {
   yr.oninput = () => { S.minYears = +yr.value; yrOut.textContent = yr.value+" yr";
     if (S.sel && yearsOf(S.sel) < S.minYears) S.sel = null; draw(); renderRail(); };
 
+  const sv = document.getElementById("showStreams");
+  sv.onclick = () => {
+    SV.on = !SV.on; sv.setAttribute("aria-pressed", String(SV.on));
+    if (SV.on) requestStreams(); else draw();
+  };
   const bad = document.getElementById("onlyBad");
   bad.onclick = () => { S.onlyBad = !S.onlyBad; bad.setAttribute("aria-pressed", String(S.onlyBad));
     if (S.sel && S.onlyBad && !(S.sel.kge_2012 < D.noSkill)) S.sel = null;
@@ -1892,7 +2146,11 @@ async function boot() {
   document.getElementById("tabMap").onclick = () => showTab("map");
   document.getElementById("tabSum").onclick = () => showTab("summary");
 
-  fit(); renderLegend(); draw(); renderRail();
+  // Requested here rather than only from setRailWidth(): initRail() calls that
+  // ONLY when a panel width is already in localStorage, so on a first visit the
+  // streams were never asked for until the viewer happened to pan or zoom. This
+  // is also the first point at which D exists, which requestStreams() requires.
+  fit(); renderLegend(); draw(); renderRail(); requestStreams();
 }
 
 window.addEventListener("resize", () => { fit(); draw(); drawHydro(); });

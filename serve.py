@@ -34,8 +34,8 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import pandas as pd
 
-from kge_map import (CACHE_DIR, DATA_DIR, GAUGE_DIR, KGE_NO_SKILL, data_paths,
-                      load_gauge_series)
+from kge_map import (CACHE_DIR, DATA_DIR, KGE_NO_SKILL, data_paths,
+                     framing_bbox, load_gauge_series)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # One source file for both deployments. Served with the __DATA__ placeholder
@@ -96,6 +96,7 @@ def load_run_config(vpu: int, metrics_path: str) -> dict:
 
 def load_gauges(vpu: int, metrics_path: str) -> dict:
     m = pd.read_parquet(metrics_path)
+    _bb = framing_bbox(m.longitude, m.latitude)
     rows = []
     for r in m.itertuples(index=False):
         rec = {
@@ -126,8 +127,8 @@ def load_gauges(vpu: int, metrics_path: str) -> dict:
                                for mm in range(1, 13)]
         rows.append(rec)
     return {"gauges": rows,
-            "bbox": [r3(m.longitude.min()), r3(m.latitude.min()),
-                     r3(m.longitude.max()), r3(m.latitude.max())],
+            "bbox": [r3(v) for v in _bb[:4]],
+            "nOutside": _bb[4],
             "vpu": vpu, "noSkill": KGE_NO_SKILL,
             "label": STATE["cfg"]["label"],
             "window": [STATE["cfg"]["date_start"], STATE["cfg"]["date_end"]]}
@@ -214,7 +215,7 @@ def climatology(obs: pd.Series) -> list:
 
 def build_series(river_id: int, fname: str | None) -> dict:
     sim = model_series(river_id)
-    obs = load_gauge_series(os.path.join(GAUGE_DIR, fname)) if fname else None
+    obs = load_gauge_series(os.path.join(STATE["gauge_dir"], fname)) if fname else None
 
     # The axis is the EVALUATION window and nothing outside it. The model array
     # was already clipped to it at startup; the gauge is clipped to match here,
@@ -315,12 +316,19 @@ def main() -> None:
     # override without recomputing; serving two runs on two ports is the reason
     # the page needs a name at all.
     ap.add_argument("--label", default=None)
+    ap.add_argument("--data-dir", default=DATA_DIR,
+                    help="directory holding master_catalog_with_metadata.xlsx "
+                         "and routing/gauge_data/. Defaults to $GEOGLOWS_EVAL_DATA.")
     args = ap.parse_args()
 
     # The gauge CSVs are read per click. Validate up front: without this a wrong
-    # GEOGLOWS_EVAL_DATA yields a server that starts fine and then draws every
+    # data directory yields a server that starts fine and then draws every
     # observed series as empty, which looks like missing gauge data.
-    data_paths(DATA_DIR)
+    #
+    # STATE["gauge_dir"] rather than the module-level GAUGE_DIR, so --data-dir
+    # actually takes effect -- GAUGE_DIR was resolved from the environment at
+    # import time and cannot see the flag.
+    _, STATE["gauge_dir"] = data_paths(args.data_dir)
 
     metrics = args.metrics or os.path.join(HERE, "outputs",
                                            f"vpu{args.vpu}_metrics.parquet")

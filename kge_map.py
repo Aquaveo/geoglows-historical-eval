@@ -636,10 +636,7 @@ def model_q_from_parquet(path: str, river_ids: np.ndarray, date_start: str,
 
     ONLY GAUGED REACHES ARE READ. parquet is columnar, so restricting to the
     reaches that actually have a gauge means the other columns are never touched
-    on disk. A routed file covering a whole VPU can carry hundreds of thousands
-    of rivers while only a few thousand are gauged, and reading the rest would
-    cost time and memory for columns no metric can use. This mirrors what
-    fetch_model_q() does with the zarr, which selects its columns the same way.
+    on disk. This mirrors what fetch_model_q() does with the zarr.
 
     SUB-DAILY INPUT IS AVERAGED TO DAILY MEAN, matching how the GEOGLOWS daily
     zarr is built from hourly routing, so the two are comparable. This is not a
@@ -727,6 +724,28 @@ def model_q_from_parquet(path: str, river_ids: np.ndarray, date_start: str,
                         columns=river_ids)
 
 
+def framing_bbox(lon: pd.Series, lat: pd.Series,
+                 pad: float = 0.04) -> tuple[float, float, float, float, int]:
+    """Map bounds that frame the bulk of the gauges, plus the count left outside.
+
+    NOT min/max. A handful of gauges with corrupt coordinates otherwise decide the
+    view for every other gauge: VPU 209 carries 8 French gauges (of 1,852) placed
+    in the South Atlantic and off Newfoundland, and they inflate the mapped area
+    **23x**, squeezing the real basin into a corner.
+
+    Uses the 0.5th-99.5th percentile of each axis, padded, so up to about 1% of
+    gauges can fall outside. They are still drawn and still clickable -- they are
+    simply not allowed to set the frame. The count is returned so the page can say
+    so rather than hiding it.
+    """
+    x0, x1 = float(lon.quantile(0.005)), float(lon.quantile(0.995))
+    y0, y1 = float(lat.quantile(0.005)), float(lat.quantile(0.995))
+    mx, my = (x1 - x0) * pad or 0.1, (y1 - y0) * pad or 0.1
+    x0, x1, y0, y1 = x0 - mx, x1 + mx, y0 - my, y1 + my
+    outside = int(((lon < x0) | (lon > x1) | (lat < y0) | (lat > y1)).sum())
+    return x0, y0, x1, y1, outside
+
+
 def load_gauge_series(path: str) -> pd.Series | None:
     """Read one gauge CSV as a daily discharge series, or None if unusable.
 
@@ -787,9 +806,7 @@ def metrics_from_pair(sim: np.ndarray, obs: np.ndarray) -> dict:
     # testing its standard deviation against zero. numpy computes the spread as
     # deviations about a computed mean, and that mean is often a rounding error
     # away from the true value, so a genuinely constant series can report a
-    # spread of ~1e-16 instead of 0. Measured: 11 of 28 constant arrays do this,
-    # e.g. np.full(900, 3.7).std(ddof=0) == 8.88e-16. Dividing by that speck
-    # writes alpha ~ 3e15, nse ~ -1e31 and kge_2012 ~ -2e15 into the table.
+    # spread of ~1e-16 instead of 0.
     #
     # max > min is an exact comparison on the stored values, so it cannot be
     # fooled by how the mean was summed, and it needs no tolerance to tune. It
@@ -854,20 +871,8 @@ def contingency_stats(both: pd.DataFrame, sim_full: pd.Series,
 
     THE THRESHOLD. For each series independently, take the maximum flow in each
     calendar year and fit a Gumbel Type-I distribution by method of moments,
-    evaluated at T=2. This is the method RFS itself uses for return periods, so
-    the threshold here is comparable with the return periods GEOGLOWS publishes.
-
-    Annual maxima come from each series' WHOLE record inside the evaluation
-    window, not from the days the two series happen to share. A flood level is a
-    property of a river, so the model's threshold should not move because a gauge
-    was offline. Verified: computed this way, t2_sim reproduces the published
-    `gumbel_daily` variable to within 0.1%, at every reach tested. Restricting to
-    paired days instead put it about 5% low.
-
-    Note the published `gumbel` variable -- the one geoglows.data.return_periods()
-    returns -- is the HOURLY one, which runs ~12.6% higher than `gumbel_daily`
-    because hourly peaks exceed daily means. This evaluation is daily throughout,
-    so `gumbel_daily` is its counterpart.
+    evaluated at T=2. Annual maxima come from each series' WHOLE record inside
+    the evaluation window, not from the days the two series happen to share.
 
     geoglows.analyze.gumbel1() is called directly rather than reimplemented, so
     the two cannot drift apart:
@@ -878,21 +883,8 @@ def contingency_stats(both: pd.DataFrame, sim_full: pd.Series,
     (ddof=0) of the annual maxima. 0.7797 is sqrt(6)/pi and 0.45 is
     0.5772 * 0.7797, which is what makes it method of moments.
 
-    WHY EACH SERIES GETS ITS OWN THRESHOLD. A model with a volume bias would
-    seldom reach the observed threshold at all, and every score would collapse
-    into a restatement of that bias. Comparing each series to its own 2-year
-    level asks a cleaner question: on the days the gauge calls a 2-year flood,
-    does the model also call one? It is a detection test, invariant to
-    systematic bias.
-
-    HOW MANY DAYS EACH SERIES FLAGS. A 2-year level is exceeded in about half of
-    years, but a flood spans several days, so the number of exceedance DAYS
-    depends on peak width and is not fixed by the threshold. The two series can
-    therefore flag different numbers of days, which means these are not purely a
-    timing test. freq_bias is stored so that can be read off rather than
-    assumed.
-
-    Contingency table on daily exceedances (>= threshold):
+    Contingency table on daily exceedances (>= threshold), each series against
+    its OWN threshold:
         a hits            both exceed
         b false alarms    model exceeds, gauge does not
         c misses          gauge exceeds, model does not
@@ -903,10 +895,6 @@ def contingency_stats(both: pd.DataFrame, sim_full: pd.Series,
         csi  = a/(a+b+c)            critical success index
         ets  = (a-ar)/(a+b+c-ar)    equitable threat score, ar = (a+b)(a+c)/n
         freq_bias = (a+b)/(a+c)
-
-    Note that flood days cluster: one flood spans several consecutive days, so
-    these count days, not independent events. Declustering would change the
-    counts.
     """
     out = {}
     o = both["obs"]
@@ -1004,12 +992,7 @@ def skill_scores(both: pd.DataFrame) -> dict:
 
     0 means "no better than the reference", 1 is perfect, negative is worse.
 
-    The reference is the gauge's own day-of-year climatology. Measured on a
-    500-gauge sample from this VPU: that reference alone achieves r = 0.215
-    against the observations, versus the model's 0.480.
-
-    NSE is already the skill score against a flat observed mean, so that
-    benchmark is not repeated here.
+    The reference is the gauge's own day-of-year climatology.
 
     The climatology is built leave-one-year-out -- each day is predicted by the
     mean of that day-of-year across every *other* year -- so the reference is not
@@ -1030,11 +1013,7 @@ def skill_scores(both: pd.DataFrame) -> dict:
 # Minimum paired days within a calendar month before that month's metrics are
 # reported. On a long record it trims almost nothing -- the median gauge-month on
 # the full VPU 714 run holds ~1,590 days.
-#
-# It is NOT inert at the --min-years default of 1: a gauge admitted with about a
-# year of overlap holds roughly 30 paired days per calendar month, below this
-# floor, so every month reports only n_m<MM> and no metrics. See KNOWN_ISSUES
-# section O for the threshold sweep.
+
 MIN_DAYS_PER_MONTH = 60
 
 
@@ -1042,8 +1021,7 @@ def monthly_stats(both: pd.DataFrame) -> dict:
     """Every whole-record metric, recomputed within each calendar month.
 
     Pools the same month across all years -- every January day against every
-    January day -- so this is "how does the model do in January", not a
-    per-January-of-each-year series.
+    January day.
 
     Columns are <metric>_m<MM> for MM = 01..12, matching the whole-record names.
     A month with fewer than MIN_DAYS_PER_MONTH paired days gets only n_m<MM>.
@@ -1056,8 +1034,7 @@ def monthly_stats(both: pd.DataFrame) -> dict:
 
     ss_clim_m<MM> keeps the SAME leave-one-year-out day-of-year reference the
     annual score uses -- the reference is not rebuilt per month -- and simply
-    scores it over that month's days. So it answers "within January, does the
-    model beat the seasonal expectation for those particular days".
+    scores it over that month's days.
     """
     out = {}
     mon = both.index.month
@@ -1171,9 +1148,7 @@ def plot_kge_map(m: pd.DataFrame, vpu: int, out_png: str,
     Colour rules: a diverging red-gray-blue scale centred on 0 and clipped to
     +/-COLOR_LIMIT. Clipping is what keeps the scale readable -- KGE' is
     unbounded below, so without it a handful of very poor gauges would flatten
-    everything else into the middle. Points are drawn worst-first so poor gauges
-    are not hidden by overplotting, and the no-skill benchmark is marked as a
-    line on the colourbar rather than given a separate colour of its own.
+    everything else into the middle.
 
     run_label names the discharge being scored and goes in the footer. The PNG is
     the one output that travels without a run.json beside it, so it is the one

@@ -513,7 +513,21 @@ Convenient here, but arbitrary for anyone else running the script. Consider requ
 **Decided and implemented.** The 2-year flood thresholds behind `pod`/`far`/`csi`/`ets` use a
 Gumbel Type-I fit by method of moments, calling `geoglows.analyze.gumbel1()` directly so the
 method cannot drift from RFS. Annual maxima are taken by calendar year from **each series'
-whole record inside the evaluation window**, not from the days the two series share.
+whole record inside the evaluation window**, not from the days the two series share. This is
+the method RFS itself uses, so the threshold is comparable with the return periods GEOGLOWS
+publishes.
+
+### Why each series is tested against its own threshold
+
+A model with a volume bias would seldom reach the *observed* threshold at all, and every score
+would collapse into a restatement of that bias. Comparing each series to its own 2-year level
+asks a cleaner question — on the days the gauge calls a 2-year flood, does the model also call
+one? — and is invariant to systematic bias.
+
+The consequence is that the two series can flag **different numbers of days**. A 2-year level
+is exceeded in about half of years, but a flood spans several days, so the count of exceedance
+*days* depends on peak width and is not fixed by the threshold. These are therefore not purely
+a timing test. `freq_bias` is stored so that can be read off rather than assumed — see item 4.
 
 ### The published return periods come in three variables, and the package exposes the wrong one
 
@@ -552,6 +566,38 @@ Verified after the change: `t2_sim` matches published `gumbel_daily` at **−0.0
    guard revisited, since a 100-year level from 40 annual maxima is extrapolation.
 4. **`freq_bias` is 0.747, not 1.** The two series flag different numbers of days even with
    matched return levels, so these are not a pure timing test. Cause not investigated.
+5. **REVISIT: should the threshold be fitted on PAIRED DAYS ONLY after all?** This was
+   switched away from paired days (see the table above) to make `t2_sim` match the published
+   `gumbel_daily`, and it does. But that reasoning optimised for agreement with a published
+   number, not for the question the contingency scores are asking, and it is what creates
+   item 1 — the two thresholds now come from different periods.
+
+   The trade-off, from the measurements already recorded above:
+
+   | | paired days | whole record (current) |
+   |---|---|---|
+   | both thresholds describe the same period | yes | **no** |
+   | `t2_sim` vs published `gumbel_daily` | ~−5% | −0.03% |
+   | gauges scored | 2,583 | 2,585 |
+   | median POD / FAR / CSI / ETS | 0.151 / 0.782 / 0.091 / 0.088 | 0.145 / 0.795 / 0.087 / 0.084 |
+
+   Arguments each way, neither settled:
+   - **Whole record**: a flood level is a property of a river, so the model's threshold should
+     not move because a gauge happened to be offline. Also reproduces the published value,
+     which makes the numbers checkable against something external.
+   - **Paired days**: the contingency table is only ever evaluated on paired days, so a
+     threshold fitted on a different sample is being applied to a sample it was not derived
+     from. On a gauge with a short or seasonally-biased record the two periods can have
+     genuinely different flow regimes, and then neither threshold means what it appears to.
+
+   Note the scores move very little either way — the largest shift in the table is FAR by
+   0.013 — so this is a question about what the number *means*, not about whether the headline
+   changes. Deciding it needs a view on whether these scores are meant to be comparable with
+   published GEOGLOWS return periods or self-contained within the paired sample.
+
+   The choice is one line in `contingency_stats()`: it currently receives `sim_full` and
+   `obs_full` (each series' whole record) from `compute_metrics()`, and would instead receive
+   `both["sim"]` and `both["obs"]`.
 
 
 ## Q. `--min-years` counts paired days, not elapsed years
