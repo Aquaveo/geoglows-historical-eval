@@ -7,61 +7,95 @@
 <title>Gauge Skill Explorer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<!-- GEO brand typefaces: Raleway for headings, Open Sans for body -- the pairing
+     the GEO Brand Book specifies (Raleway main, Open Sans as the web-safe
+     companion) and the one apps.geoglows.org loads. IBM Plex Mono stays for
+     figures only: the brand book names no monospace, and tabular numerals are a
+     legibility requirement here, not a style choice. Every stack below falls
+     back to system fonts, so the page still reads correctly offline. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Open+Sans:wght@400;500;600;700&family=Raleway:wght@600;700;800&display=swap">
 
 <style>
 /* ---- tokens: complete light palette on bare :root ------------------------ */
+/*
+   GEO brand palette. Values are taken from the GEO Brand Book, not approximated:
+     #243754  secondary, PANTONE 534 C   masthead, observed series, primary ink
+     #008B7B  main,      PANTONE 562 C   accent and the simulated series
+     #71ACB2  main,      PANTONE 5493 C  the same accent for dark surfaces
+     #E6EAEF  secondary                  light ink on dark, panel tints
+     #1D1D24  secondary, PANTONE 532 C   dark ground
+   The three GEO main colours are the three rings of the GEOGLOWS mark itself.
+
+   --obs and --accent ARE DATA, not decoration: they encode observed against
+   simulated in the hydrograph, the flow-duration curve and the monthly regime.
+   The pairs were validated rather than chosen by eye --
+     light  #243754 / #008B7B   dE 25.9 normal, 24.4 deutan, both >= 3:1
+     dark   #E6EAEF / #71ACB2   dE 23.6 normal, 20.8 protan,  both >= 3:1
+   which matters because this brand palette is entirely cool: a plausible-looking
+   slate grey against #008B7B measures dE 2.4 under deuteranopia -- indistinguishable
+   -- where the old warm grey against orange was fine on hue alone. Re-validate
+   before changing either token.
+*/
 :root {
   color-scheme: light;
-  --bg:        #f7f6f3;
-  --panel:     #fdfdfc;
-  --panel-2:   #f1efe9;
-  --ink:       #1a1a17;
-  --ink-2:     #55544e;
-  --ink-3:     #8a8880;
-  --rule:      #e3e1da;
-  --rule-2:    #d2cfc5;
-  --accent:    #b06c2b;
-  --accent-sf: #f6ecdd;
-  --shadow:    0 1px 2px rgba(26,26,23,.06), 0 8px 24px rgba(26,26,23,.07);
-  --land:      #efeee9;
-  --water:     #e6e7e4;
+  --bg:        #f6f9fb;
+  --panel:     #ffffff;
+  --panel-2:   #eef1f6;
+  --ink:       #1d1d24;
+  --ink-2:     #445a80;
+  --ink-3:     #7b88a1;
+  --rule:      #dbe1ec;
+  --rule-2:    #c3ccdc;
+  --accent:    #008b7b;
+  --accent-sf: #e7f0ed;
+  --obs:       #243754;
+  --brand:     #243754;
+  --brand-ink: #ffffff;
+  --shadow:    0 1px 2px rgba(36,55,84,.06), 0 8px 24px rgba(36,55,84,.08);
+  --land:      #eef1f6;
+  --water:     #e1e8f2;
   --ramp-mode: "light";
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg:        #131311;
-    --panel:     #1c1c19;
-    --panel-2:   #232320;
-    --ink:       #f2f1ec;
-    --ink-2:     #b4b2a8;
-    --ink-3:     #7e7c74;
-    --rule:      #2e2e29;
-    --rule-2:    #3d3c36;
-    --accent:    #d99544;
-    --accent-sf: #33261480;
+    --bg:        #1d1d24;
+    --panel:     #262631;
+    --panel-2:   #2f2f3c;
+    --ink:       #e6eaef;
+    --ink-2:     #aab6c9;
+    --ink-3:     #8390a6;
+    --rule:      #383846;
+    --rule-2:    #474757;
+    --accent:    #71acb2;
+    --accent-sf: #1c3a3a80;
+    --obs:       #e6eaef;
+    --brand:     #243754;
+    --brand-ink: #ffffff;
     --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
-    --land:      #1f1f1c;
-    --water:     #191917;
+    --land:      #26262f;
+    --water:     #1f1f27;
     --ramp-mode: "dark";
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg:        #131311;
-  --panel:     #1c1c19;
-  --panel-2:   #232320;
-  --ink:       #f2f1ec;
-  --ink-2:     #b4b2a8;
-  --ink-3:     #7e7c74;
-  --rule:      #2e2e29;
-  --rule-2:    #3d3c36;
-  --accent:    #d99544;
-  --accent-sf: #33261480;
+  --bg:        #1d1d24;
+  --panel:     #262631;
+  --panel-2:   #2f2f3c;
+  --ink:       #e6eaef;
+  --ink-2:     #aab6c9;
+  --ink-3:     #8390a6;
+  --rule:      #383846;
+  --rule-2:    #474757;
+  --accent:    #71acb2;
+  --accent-sf: #1c3a3a80;
+  --obs:       #e6eaef;
+  --brand:     #243754;
+  --brand-ink: #ffffff;
   --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
-  --land:      #1f1f1c;
-  --water:     #191917;
+  --land:      #26262f;
+  --water:     #1f1f27;
   --ramp-mode: "dark";
 }
 
@@ -74,14 +108,51 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 400 14px/1.5 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 400 14px/1.5 "Open Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, .display {
+  font-family: "Raleway", "Open Sans", system-ui, sans-serif;
+  letter-spacing: -.01em;
 }
 
 .num { font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
        font-variant-numeric: tabular-nums; }
 
-.app { display: grid; grid-template-rows: auto 1fr; height: 100vh; height: 100dvh; }
+/* Masthead row, then the control bar, then the body. */
+.app { display: grid; grid-template-rows: auto auto 1fr; height: 100vh; height: 100dvh; }
+
+/* ---- masthead ------------------------------------------------------------ */
+/* Navy in BOTH themes, the way apps.geoglows.org carries it. The GEOGLOWS mark
+   is only published in colour or in white, and white-on-navy is the lockup the
+   brand book shows -- so the strip cannot follow the theme without leaving the
+   logo unreadable in one of them. */
+.mast {
+  display: flex; align-items: center; gap: 14px;
+  padding: 9px 18px; background: var(--brand); color: var(--brand-ink);
+}
+.mast img {
+  height: 26px; width: auto; display: block;
+  /* Brand-book clear space: at least the height of the "G" on every side. */
+  margin-right: 4px;
+}
+.mast .divider {
+  width: 1px; align-self: stretch; margin: 2px 0;
+  background: rgba(255,255,255,.28);
+}
+.mast h1 {
+  margin: 0; font-size: 15px; font-weight: 700; color: var(--brand-ink);
+}
+.mast .sub {
+  font-size: 11.5px; color: rgba(255,255,255,.72); margin-left: auto;
+  text-align: right;
+}
+@media (max-width: 640px) {
+  .mast { flex-wrap: wrap; gap: 8px; }
+  .mast .sub { margin-left: 0; width: 100%; text-align: left; }
+  .mast .divider { display: none; }
+}
 
 /* ---- toolbar ------------------------------------------------------------- */
 .bar {
@@ -89,9 +160,6 @@ body {
   padding: 11px 18px; background: var(--panel);
   border-bottom: 1px solid var(--rule);
 }
-.brand { display: flex; align-items: baseline; gap: 10px; margin-right: 4px; }
-.brand h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
-.brand .sub { font-size: 11.5px; color: var(--ink-3); }
 
 .ctl { display: flex; align-items: center; gap: 8px; }
 .ctl > label {
@@ -392,12 +460,14 @@ svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
 </style>
 
 <div class="app">
-  <div class="bar">
-    <div class="brand">
-      <h1>Gauge Skill Explorer</h1>
-      <span class="sub" id="brandsub">loading…</span>
-    </div>
+  <div class="mast">
+    <img src="data:image/png;base64,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" alt="GEOGLOWS — Global Water Sustainability">
+    <span class="divider"></span>
+    <h1>Gauge Skill Explorer</h1>
+    <span class="sub" id="brandsub">loading…</span>
+  </div>
 
+  <div class="bar">
     <div class="tabs">
       <button id="tabMap" aria-pressed="true">Map</button>
       <button id="tabSum" aria-pressed="false">Summary</button>
@@ -665,6 +735,15 @@ const cv = document.getElementById("map"), ctx = cv.getContext("2d");
 let W=0, H=0, base=1, ox=0, oy=0, KX=1, BX0=0, BY0=0, BX1=1, BY1=1;
 const view = { s:1, tx:0, ty:0 };
 
+// s = 1 is "the VPU fills the viewport", and it used to be the hard floor -- so
+// the map could not be zoomed out far enough to show where on Earth the basin
+// is. MIN_S is instead the scale at which the WHOLE GLOBE fits, which depends on
+// how big this VPU is: a basin spanning 35 deg reaches it around s = 0.09, a
+// small one an order of magnitude lower. Capped at 1 so a hypothetical
+// world-spanning VPU still gets a sane floor rather than one above its own fit.
+let MIN_S = 1;
+const MAX_S = 40;
+
 function fit() {
   const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   W = r.width; H = r.height;
@@ -674,7 +753,11 @@ function fit() {
   base = Math.min((W-56)/w, (H-56)/h);
   ox = W/2 - ((BX0+BX1)/2)*KX*base;
   oy = H/2 + ((BY0+BY1)/2)*base;
+  // 360 deg of longitude and 180 of latitude, with a margin so the globe does
+  // not sit exactly edge to edge.
+  MIN_S = Math.min(1, 0.92*Math.min(W/(360*KX*base), H/(180*base)));
 }
+const clampS = s => Math.max(MIN_S, Math.min(MAX_S, s));
 const px = lon => (lon*KX*base + ox)*view.s + view.tx;
 const py = lat => (oy - lat*base)*view.s + view.ty;
 
@@ -712,7 +795,9 @@ function viewBounds() {
 }
 
 function requestStreams() {
-  if (!SV.on || !D || W < 2 || H < 2) return;
+  // Not below the VPU's own fit: the reach network is meaningless at continental
+  // zoom and the request would ask the service for a whole hemisphere of it.
+  if (!SV.on || !D || W < 2 || H < 2 || view.s < 1) { SV.img = null; return; }
   const b = viewBounds();
   const key = b.map(v => v.toFixed(4)).join(",");
   if (SV.pending === key || (SV.box && SV.box.key === key)) return;
@@ -777,6 +862,13 @@ function draw() {
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = cssVar("--land"); ctx.fillRect(0,0,W,H);
   const bm = D.basemap || {};
+  // Global context, drawn only once zoomed out past the VPU's own fit. Above
+  // that it would double every coastline the detailed layers already draw, at a
+  // coarser tolerance; below it, it is the only thing out there to see.
+  // Muted ink, not a rule colour: the rule tokens are tuned for hairlines inside
+  // panels and wash out completely against the map surface at this zoom, which
+  // left the continents barely visible and the whole layer pointless.
+  if (view.s < 1) drawLines(bm.world, cssVar("--ink-3"), 0.8);
   drawLines(bm.lakes,     cssVar("--rule"),   0.8);
   drawLines(bm.states,    cssVar("--rule-2"), 0.7);
   // Country borders heavier than sub-national ones and drawn after them, so the
@@ -1103,7 +1195,7 @@ function drawHydro() {
     plot(ca, cssVar("--ink-3"), 1.4, [4,3]);
   }
   plot(sim, cssVar("--accent"), 1.1);
-  plot(obs, cssVar("--ink-2"),  1.1);
+  plot(obs, cssVar("--obs"),    1.1);
 }
 
 function wireHydro() {
@@ -1282,15 +1374,23 @@ function renderGauge(g) {
         </span>
       </div>
       <div class="swatches">
-        <span><i style="background:${cssVar('--ink-2')}"></i>Observed</span>
+        <span><i style="background:${cssVar('--obs')}"></i>Observed</span>
         <span><i style="background:${cssVar('--accent')}"></i>Simulated</span>
         <span><i style="background:${cssVar('--ink-3')}"></i>Climatology</span>
       </div>
       <div class="hydro" id="hy"><div class="spin"><span class="b"></span>querying GEOGLOWS…</div></div>
     </div>` : ""}
 
+    <!-- Both of these draw observed against simulated with nothing but colour
+         telling them apart, and the hydrograph's swatches are server-only -- so
+         in the built page they had no key at all. Two series always carry a
+         legend; reuses .swatches rather than inventing a second one. -->
     <div class="sec">
       <h3>Flow duration curve</h3>
+      <div class="swatches">
+        <span><i style="background:${cssVar('--obs')}"></i>Observed</span>
+        <span><i style="background:${cssVar('--accent')}"></i>Simulated</span>
+      </div>
       <div id="fdc"></div>
       <div class="chartcap">Discharge (m³/s, log) against exceedance probability.
         Left is flood, right is low flow.</div>
@@ -1299,6 +1399,10 @@ function renderGauge(g) {
 
     <div class="sec">
       <h3>Mean monthly regime</h3>
+      <div class="swatches">
+        <span><i style="background:${cssVar('--obs')}"></i>Observed</span>
+        <span><i style="background:${cssVar('--accent')}"></i>Simulated</span>
+      </div>
       <div id="mon"></div>
       <div class="chartcap">Average discharge by calendar month.</div>
       <div class="chartcap" id="moncap"></div>
@@ -1420,11 +1524,11 @@ function drawCurves(wrap, fo, fs, mo, ms, window, nPaired) {
   const fdc = wrap.querySelector("#fdc");
   if (fdc) fdc.appendChild(lineChart({
     xs: ex, logY: true, xTicks: ticks, yFmt: sig,
-    series: [{v: fo, c: cssVar("--ink-2")}, {v: fs, c: cssVar("--accent")}]}));
+    series: [{v: fo, c: cssVar("--obs")}, {v: fs, c: cssVar("--accent")}]}));
   const mon = wrap.querySelector("#mon");
   if (mon) mon.appendChild(lineChart({
     xs: MONTHS, h: 118, xTicks: MONTHS.map((l,i)=>({i,label:l})), yFmt: sig,
-    series: [{v: mo, c: cssVar("--ink-2")}, {v: ms, c: cssVar("--accent")}]}));
+    series: [{v: mo, c: cssVar("--obs")}, {v: ms, c: cssVar("--accent")}]}));
 
   // Name the sample on both captions. Identical wording over two different
   // samples is exactly the defect this fix exists to remove.
@@ -1547,12 +1651,12 @@ cv.addEventListener("pointerleave", () => { tip.classList.remove("on");
 cv.addEventListener("wheel", e => {
   e.preventDefault();
   const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
-  const ns = Math.max(1, Math.min(40, view.s*Math.exp(-e.deltaY*0.0016))), f = ns/view.s;
+  const ns = clampS(view.s*Math.exp(-e.deltaY*0.0016)), f = ns/view.s;
   view.tx = mx-(mx-view.tx)*f; view.ty = my-(my-view.ty)*f; view.s = ns; draw(); scheduleStreams();
 }, {passive:false});
 
 function zoomBy(k) {
-  const ns = Math.max(1, Math.min(40, view.s*k)), f = ns/view.s;
+  const ns = clampS(view.s*k), f = ns/view.s;
   view.tx = W/2-(W/2-view.tx)*f; view.ty = H/2-(H/2-view.ty)*f; view.s = ns; draw();
   scheduleStreams();
 }

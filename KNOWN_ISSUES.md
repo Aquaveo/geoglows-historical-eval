@@ -631,6 +631,76 @@ and any ten consecutive calendar years has 3652 or 3653 days, so both are kept. 
 `n_pairs` in the current output is exactly 3652, admitted at the boundary.
 
 
+## S. The xlsx matches 840 gauges the bucket marks `-1` — they are duplicates
+
+`RESOLVED` — recorded because the wrong reading of it is very easy to reach
+
+Gauges are now read from `s3://master-gauge-data`, using the per-provider `catalog.csv` files
+instead of `master_catalog_with_metadata.xlsx`. The two catalogs are the same size — 37,529
+rows against 37,528 — and `final_river_id` agrees on every gauge they both match. They do not,
+however, match the same gauges.
+
+Measured 2026-09-14 across all 154 prefixes at tag `20251008`, on the 37,027 gauges both know:
+
+| | gauges |
+|---|---|
+| matched to a reach in both | 24,454 |
+| matched in the xlsx, sentinel `-1` in the bucket | 840 |
+| matched in the bucket, not in the xlsx | 1 |
+| unmatched in both | 11,732 |
+
+**The 840 are not a gap in the bucket. They are the same stations twice.** 839 are CARAVAN,
+and CARAVAN is an aggregation that republishes national datasets under prefixed ids:
+
+| prefix | gauges | upstream |
+|---|---|---|
+| `hysets_` | 545 | HYSETS — which is itself built on HYDAT |
+| `camelsaus_` | 148 | CAMELS-AUS — BoM |
+| `lamah_` | 75 | LamaH — central Europe |
+| `camelsbr_` | 71 | CAMELS-BR — ANA |
+
+Strip the prefix and **492 of the 839 already exist in the bucket, matched, under their native
+provider** (HYDAT 308, BoM 118, ANA 65, SENAMHI 1) — and **353 of those resolve to the same
+reach**. For example `camelsaus_105105A` and BoM `105105A` both carry `final_river_id`
+540626550. The `-1` on CARAVAN is deliberate de-duplication.
+
+### Why overriding it was worse than doing nothing
+
+An earlier version of `S3GaugeSource._enrich()` filled these matches in from the xlsx. On
+VPU 714 that added 6 gauges — and took duplicates-on-a-shared-reach from **1 to 31**.
+`compute_metrics()` breaks those ties with `drop_duplicates("final_river_id", keep="first")`
+after sorting by `n_pairs`, so the longest record wins: a CARAVAN republication can displace
+the native gauge and silently change which station a reach is scored against. The enrichment
+was removed; the bucket is authoritative for matching, including where it declines to match.
+
+The remaining 347 have no native counterpart in the bucket. They are either genuinely unique
+or their native copy is itself unmatched — neither is a reason to override the publisher.
+
+### Köppen group is absent from S3 runs
+
+`DEFER`
+
+No bucket column corresponds to `Koppen Group (as of 2024)`. An S3 run therefore writes
+`koppen = None` for every gauge and the page's Köppen grouping is empty; a `--gauge-source
+local` run still picks it up from the xlsx as before.
+
+Filling it from the xlsx was implemented and then removed, deliberately: it was the same
+mechanism as the reach-match override above, and keeping it meant keeping a code path whose
+whole purpose was to disagree with the publisher. Unlike reach matching this one is harmless —
+Köppen is a label, not an identity — but it is not currently wanted.
+
+Deriving it from latitude/longitude against a published Köppen–Geiger raster would give every
+run the grouping with no local file at all. Not tried.
+
+### How this was nearly missed
+
+Presence is not the test. Every one of the 2,626 gauges in the VPU 714 baseline *appears* in
+the bucket catalog, and checking only that is what produced the first, wrong conclusion. The
+test is whether `final_river_id > 0` in each catalog for the same gauge — and then, before
+treating a difference as a gap, whether the "missing" gauge is the same station under another
+name.
+
+
 ---
 
 ## Not an issue, recorded for reference

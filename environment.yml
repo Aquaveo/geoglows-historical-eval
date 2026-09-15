@@ -36,6 +36,12 @@ dependencies:
   - aiohttp        # fsspec's HTTP filesystem backend
   - requests
 
+  # Observed gauges, read straight from the private bucket. Credentials come
+  # from boto's own chain -- a profile, environment variables or an instance
+  # role -- never from this repository. Only needed for --gauge-source s3,
+  # which is the default when no local gauge directory is present.
+  - s3fs>=2024.2
+
   # serve.py queries the retrospective per reach through this package.
   # kge_map.py does not need it -- that one reads the zarr directly.
   - geoglows>=2.2
