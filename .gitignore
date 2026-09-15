@@ -19,3 +19,11 @@ __pycache__/
 # Working notes, not part of the code
 ideas.docx
 *:Zone.Identifier
+
+# Credentials. Nothing here writes these -- AWS keys are read from boto's own
+# chain, outside the working directory -- but this repository is public and a
+# stray copy must not become a commit.
+.env
+.aws/
+credentials
+*.pem

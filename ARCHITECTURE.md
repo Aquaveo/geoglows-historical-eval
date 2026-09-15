@@ -82,17 +82,35 @@ Sub-daily input is averaged to **daily mean**, matching how the daily zarr is bu
 hourly routing. That is not neutral: on a 200-reach sample the daily *maximum* ran 39%
 above the daily mean at the median reach.
 
-**Observed side.** Per-gauge CSVs on local disk, schema `datetime,discharge`:
+**Observed side.** Per-gauge CSVs, schema `datetime,discharge`, from either of two places:
 
 ```
+s3://master-gauge-data/production/production-{ISO_A3}-{provider}-{YYYYMMDD}/measurements/{station}.csv
 <data-dir>/routing/gauge_data/{ISO_A3}_{provider}_{station}.csv
 ```
 
-with metadata in `<data-dir>/master_catalog_with_metadata.xlsx` (37,528 rows).
-`<data-dir>` comes from `--data-dir` or `$GEOGLOWS_EVAL_DATA`; it is validated
-before any other work so a wrong path fails immediately. All sampled series are
-daily — 0 of 400 sampled files carry sub-daily rows — so no resampling happens. Files that
-do would be handled by keeping the **first** reading of each day, not by averaging.
+The bucket is the default and needs no local input — it publishes its own catalog, one
+`catalog.csv` per provider, 37,529 rows concatenated. A local directory is used instead when
+`<data-dir>/routing/gauge_data/` exists, with metadata from
+`<data-dir>/master_catalog_with_metadata.xlsx` (37,528 rows). `--gauge-source` forces either.
+`<data-dir>` comes from `--data-dir` or `$GEOGLOWS_EVAL_DATA`. The source is resolved before
+any other work, so a wrong path or an unusable credential fails immediately rather than
+surfacing as zero gauges found.
+
+The two backends live behind one interface in `kge_map.py` — `catalog()`, `resolve()`,
+`locate()`, `open()` — and nothing downstream knows which is in use. The flattened
+`{ISO_A3}_{provider}_{station}.csv` spelling is the gauge's **identity** either way: it is
+what reaches the metrics parquet, so a parquet scored from one backend can be rebuilt into a
+page by the other. `provider_for()` reconstructs the provider from the xlsx's free-text
+columns for the local path only; the bucket takes it from the prefix name, where it is
+authoritative rather than inferred.
+
+The bucket catalog is missing Köppen group and the reach matches for 840 gauges, mostly
+CARAVAN; the xlsx supplies both when present. See KNOWN_ISSUES section S.
+
+All sampled series are daily — 0 of 400 sampled files carry sub-daily rows — so no resampling
+happens. Files that do would be handled by keeping the **first** reading of each day, not by
+averaging.
 
 **The join.** The catalog column `final_river_id` is a TDX-Hydro `LINKNO`, which is the
 model's `river_id`. Stream order and drainage area come from a third source:

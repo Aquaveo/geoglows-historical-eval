@@ -631,6 +631,53 @@ and any ten consecutive calendar years has 3652 or 3653 days, so both are kept. 
 `n_pairs` in the current output is exactly 3652, admitted at the boundary.
 
 
+## S. The bucket catalog does not match 840 gauges the xlsx does
+
+`CAVEAT` · `FIX-BEFORE-GLOBAL`
+
+Gauges can now be read straight from `s3://master-gauge-data`, using the per-provider
+`catalog.csv` files instead of `master_catalog_with_metadata.xlsx`. The two catalogs are the
+same size — 37,529 rows against 37,528 — and `final_river_id` agrees on every gauge they both
+match. But they do not match the same gauges.
+
+Measured 2026-09-14 across all 154 prefixes at tag `20251008`, on the 37,027 gauges both
+catalogs know:
+
+| | gauges |
+|---|---|
+| matched to a reach in both | 24,454 |
+| **matched in the xlsx, sentinel `-1` in the bucket** | **840** |
+| matched in the bucket, not in the xlsx | 1 |
+| unmatched in both | 11,732 |
+
+The 840 are **839 CARAVAN and 2 DGRE**. Every one of CAN-CARAVAN's 886 gauges carries
+`final_river_id = -1` in the bucket, so the reach matching behind the xlsx (the `jorge_*`
+columns suggest it was done separately) has not been published back to the bucket.
+
+- **Impact on VPU 714: 6 gauges**, which is why this is a caveat rather than a blocker. A
+  CARAVAN-heavy VPU would lose far more — CARAVAN spans Canada, Australia, Brazil, Austria
+  and others, so this is not a North America problem.
+- **Worked around, not fixed.** `S3GaugeSource._enrich()` fills reach ids in from the xlsx
+  when one is present under `--data-dir`, and Köppen with it. The bucket wins wherever it has
+  an opinion, so the xlsx can only add gauges, never move one. A run with no xlsx scores the
+  6 fewer and says so.
+- **The real fix** is to publish the matching into the bucket catalogs, after which the
+  enrichment path can go.
+
+### Köppen group is not in the bucket at all
+
+Separately from the matching: no bucket column corresponds to `Koppen Group (as of 2024)`, so
+a bucket-only run has no `koppen` and the web page loses that grouping. Same workaround —
+supplied by the xlsx when it is there. Deriving it from latitude/longitude against a published
+Köppen-Geiger raster would remove the last reason to keep the xlsx, and has not been tried.
+
+### Measuring it again
+
+Presence is not the test — every one of the 2,626 gauges in the VPU 714 baseline *appears* in
+the bucket catalog, and checking only that is what hid this. The test is whether
+`final_river_id > 0` in each catalog for the same gauge.
+
+
 ---
 
 ## Not an issue, recorded for reference

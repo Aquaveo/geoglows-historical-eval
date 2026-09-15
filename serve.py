@@ -20,7 +20,13 @@ browser sandbox and cannot run Python. Run this locally instead.
 
 Serving two runs on two ports is how they get compared side by side; --label
 names each one on its page. Uses only the standard library plus pandas/numpy --
-no Flask, and no network access.
+no Flask.
+
+The modelled side is served entirely from the cached local array. The observed
+side is read per click, from the gauge bucket by default or from a local copy
+with --data-dir, so a click on a new gauge costs one read (~0.2s against S3).
+Gauges are cached in-process after first read, which is what makes going back
+and forth between two of them feel instant.
 """
 from __future__ import annotations
 
@@ -28,14 +34,16 @@ import argparse
 import json
 import os
 import traceback
+from functools import lru_cache
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import pandas as pd
 
-from kge_map import (CACHE_DIR, DATA_DIR, KGE_NO_SKILL, data_paths,
-                     framing_bbox, load_gauge_series)
+from kge_map import (CACHE_DIR, KGE_NO_SKILL, add_gauge_source_args,
+                     framing_bbox, load_gauge_series, note_unused_data_dir,
+                     source_from_args)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # One source file for both deployments. Served with the __DATA__ placeholder
@@ -213,9 +221,22 @@ def climatology(obs: pd.Series) -> list:
     return [r3(x) for x in out]
 
 
+@lru_cache(maxsize=512)
+def cached_gauge_series(fname: str):
+    """One gauge's observed series, remembered across clicks.
+
+    Unlike the batch scripts this reads one gauge per request, so against S3
+    every click is a fresh ~0.2s round trip -- and revisiting a gauge, which is
+    exactly what comparing two of them involves, paid it again. The cache is
+    per-process and the CSVs are immutable within a snapshot, so there is
+    nothing to invalidate; 512 gauges is a few tens of MB at most.
+    """
+    return load_gauge_series(STATE["source"].locate(fname), STATE["source"])
+
+
 def build_series(river_id: int, fname: str | None) -> dict:
     sim = model_series(river_id)
-    obs = load_gauge_series(os.path.join(STATE["gauge_dir"], fname)) if fname else None
+    obs = cached_gauge_series(fname) if fname else None
 
     # The axis is the EVALUATION window and nothing outside it. The model array
     # was already clipped to it at startup; the gauge is clipped to match here,
@@ -316,19 +337,16 @@ def main() -> None:
     # override without recomputing; serving two runs on two ports is the reason
     # the page needs a name at all.
     ap.add_argument("--label", default=None)
-    ap.add_argument("--data-dir", default=DATA_DIR,
-                    help="directory holding master_catalog_with_metadata.xlsx "
-                         "and routing/gauge_data/. Defaults to $GEOGLOWS_EVAL_DATA.")
+    add_gauge_source_args(ap)
     args = ap.parse_args()
 
-    # The gauge CSVs are read per click. Validate up front: without this a wrong
-    # data directory yields a server that starts fine and then draws every
-    # observed series as empty, which looks like missing gauge data.
-    #
-    # STATE["gauge_dir"] rather than the module-level GAUGE_DIR, so --data-dir
-    # actually takes effect -- GAUGE_DIR was resolved from the environment at
-    # import time and cannot see the flag.
-    _, STATE["gauge_dir"] = data_paths(args.data_dir)
+    # The gauge CSVs are read per click. Resolve the source up front: without
+    # this a wrong data directory or a missing credential yields a server that
+    # starts fine and then draws every observed series as empty, which looks
+    # like missing gauge data rather than a misconfiguration.
+    STATE["source"] = source_from_args(args)
+    note_unused_data_dir(args, STATE["source"])
+    print(f"gauges: {STATE['source'].describe()}")
 
     metrics = args.metrics or os.path.join(HERE, "outputs",
                                            f"vpu{args.vpu}_metrics.parquet")
@@ -349,9 +367,15 @@ def main() -> None:
     STATE["fname_by_id"] = {g["id"]: g.pop("fname") for g in payload["gauges"]}
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    # Say where the observations come from, because it decides whether a click
+    # is instant or a round trip -- and whether the server works offline at all.
+    obs = ("read per click from " + STATE["source"].describe()
+           if STATE["source"].kind == "s3" else
+           "on local disk at " + STATE["source"].describe())
     print(f"\n  Gauge Skill Explorer -> http://localhost:{args.port}\n"
           f"  run: {STATE['cfg']['label']}\n"
-          f"  all series come from the local model array -- no network access\n"
+          f"  modelled series: local model array, no network\n"
+          f"  observed series: {obs}\n"
           f"  Ctrl-C to stop\n")
     try:
         srv.serve_forever()

@@ -45,25 +45,39 @@ USAGE
                   still covers the untrimmed window and is not invalidated.
     --refresh     Discard the cached model array and re-read it.
     --outdir      Where to write outputs. Default outputs/.
-    --data-dir    Directory holding the observed-gauge inputs -- the catalog xlsx
-                  and routing/gauge_data/. Defaults to $GEOGLOWS_EVAL_DATA, and
-                  failing that to a path that exists only on the author's
-                  machine, so set one of the two before the first run. Checked
-                  before anything else, so a wrong path fails immediately.
+    --data-dir    Directory holding local gauge inputs -- routing/gauge_data/
+                  and, optionally, the catalog xlsx. Defaults to
+                  $GEOGLOWS_EVAL_DATA. Only needed when reading gauges locally,
+                  or to supply what the bucket catalog lacks (see below).
+    --gauge-source  local or s3. Default: local if <data-dir>/routing/gauge_data/
+                  exists, else s3. Resolved before anything else, so a wrong
+                  path or a missing credential fails immediately.
+    --aws-profile Named AWS profile for the gauge bucket. Omit to use the
+                  standard credential chain -- default profile, environment
+                  variables, instance role -- which is what lets this run
+                  unchanged in CI or on an EC2 box.
+    --gauge-date-tag
+                  Which published gauge snapshot to read. Recorded in run.json,
+                  because it is part of every key and a new publication moves
+                  every score.
     --label       Name for this run, shown on the map footer, the web page and
                   its browser tab. Default RUN_LABEL below.
 
 INPUTS REQUIRED
-  Gauge CSVs        In <data-dir>/routing/gauge_data/, named
-                    {ISO_A3}_{provider}_{station}.csv, with
-                    columns datetime,discharge. Obtain them for the VPU being
-                    evaluated before running. A catalogued gauge with no CSV is
-                    skipped and reported in the run log. This can be downloaded from
-                    the AWS bucket.
-  Gauge catalog     <data-dir>/master_catalog_with_metadata.xlsx, covering all
-                    VPUs. Must contain
-                    final_river_id, gauge_id, ISO_A3, latitude, longitude. This also comes
-                    from the AWS bucket.
+  Gauge CSVs        Columns datetime,discharge. Read straight from the private
+                    bucket s3://master-gauge-data by default -- nothing to
+                    prepare beyond AWS credentials that reach it. Or from
+                    <data-dir>/routing/gauge_data/, named
+                    {ISO_A3}_{provider}_{station}.csv, if a local copy is there.
+                    A catalogued gauge with no CSV is skipped and reported in
+                    the run log.
+  Gauge catalog     Published in the bucket, one catalog.csv per provider, so
+                    nothing local is required. <data-dir>/master_catalog_with_
+                    metadata.xlsx is used IN ADDITION when present, for the two
+                    things the bucket lacks: Koppen group, and reach matches for
+                    840 gauges the bucket marks unmatched. Without it a run
+                    scores slightly fewer gauges and has no Koppen grouping.
+                    See KNOWN_ISSUES section S.
   Network table     Fetched from S3 at run time. The v2-model-table Supplies stream order and
                     drainage area.
   Model discharge   Normally the daily zarr, fetched from S3 at run time --
@@ -238,6 +252,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -287,6 +302,22 @@ def data_paths(data_dir: str) -> tuple[str, str]:
 # build_webapp.py import GAUGE_DIR without re-parsing arguments.
 CATALOG_PATH = os.path.join(DATA_DIR, "master_catalog_with_metadata.xlsx")
 GAUGE_DIR = os.path.join(DATA_DIR, "routing", "gauge_data")
+
+# The private bucket the gauges are published to. Reading needs s3:ListBucket on
+# the bucket and s3:GetObject on production/*; credentials come from boto's own
+# chain, never from this repository. See README, "What you need before running".
+GAUGE_BUCKET = "master-gauge-data"
+
+# The snapshot the gauges are read from. It is part of every key, so a new
+# publication changes every score -- which is why it is written into run.json
+# rather than left implicit. Every prefix in the bucket carries this one tag
+# today; when that stops being true this becomes a real choice.
+GAUGE_DATE_TAG = "20251008"
+
+# Parallel gauge reads. Each is a separate round trip of ~0.2s, so a VPU's worth
+# of them is entirely latency: 2,600 gauges take ~8 minutes serially and under a
+# minute at this width. Matches the width download_observed_data.py uses.
+GAUGE_WORKERS = 12
 
 ZARR_URL = "http://geoglows-v2.s3-us-west-2.amazonaws.com/retrospective/daily.zarr"
 MODEL_TABLE_URL = "http://geoglows-v2.s3-us-west-2.amazonaws.com/tables/v2-model-table.parquet"
@@ -430,12 +461,408 @@ def gauge_filename(row: pd.Series) -> str:
     return f"{str(row['ISO_A3']).strip()}_{provider_for(row)}_{station}.csv"
 
 
-def build_gauge_table(vpu: int, catalog: str = CATALOG_PATH,
-                      gauge_dir: str = GAUGE_DIR) -> pd.DataFrame:
-    """Catalog gauges in `vpu` that have a real reach id, network attrs, and a CSV."""
-    print(f"[1/5] building gauge table for VPU {vpu}")
+def _station_id(v) -> str:
+    """gauge_id as it appears in a filename or an S3 key.
 
-    cat = pd.read_excel(catalog)
+    pandas reads numeric gauge ids as floats, so USGS 10011200 arrives as
+    '10011200.0' and would match nothing. Both backends key on this, so they
+    have to strip it the same way.
+    """
+    s = str(v).strip()
+    return s[:-2] if s.endswith(".0") else s
+
+
+# --------------------------------------------------------------------------- #
+# Gauge source -- where the catalog and the observed CSVs are read from
+# --------------------------------------------------------------------------- #
+#
+# Two backends, one shape. Both answer the same two questions and nothing else
+# downstream knows which one it is talking to:
+#
+#     catalog()      every catalogued gauge, as a DataFrame
+#     resolve(g)     given the gauges for one VPU, attach a `loc` column saying
+#                    where each one's CSV is, and DROP the ones that have none
+#     open(loc)      that CSV, as a file object
+#
+# Splitting resolve() from catalog() is what keeps the S3 backend affordable.
+# The catalog is global (~37,500 gauges) but the measurement listings are
+# per-provider, so resolve() lists only the handful of prefixes the VPU actually
+# touches -- about seven for VPU 714 -- rather than all 154.
+
+class LocalGaugeSource:
+    """Gauges from a directory produced by download_observed_data.py."""
+
+    kind = "local"
+
+    def __init__(self, data_dir: str):
+        self.data_dir = data_dir
+        self.catalog_path, self.gauge_dir = data_paths(data_dir)
+
+    def describe(self) -> str:
+        return f"local:{os.path.abspath(self.data_dir)}"
+
+    def catalog(self) -> pd.DataFrame:
+        return pd.read_excel(self.catalog_path)
+
+    def resolve(self, g: pd.DataFrame) -> pd.DataFrame:
+        g = g.copy()
+        g["fname"] = g.apply(gauge_filename, axis=1)
+        # One listdir and a set test, not one stat per gauge. Same answer, and
+        # it puts the local backend on the same footing as the S3 one.
+        try:
+            present = set(os.listdir(self.gauge_dir))
+        except OSError as e:
+            raise SystemExit(f"cannot list {self.gauge_dir}: {e}")
+        g["loc"] = g["fname"].map(self.locate)
+        return g[g["fname"].isin(present)]
+
+    def locate(self, fname: str) -> str | None:
+        return os.path.join(self.gauge_dir, fname)
+
+    def open(self, loc: str):
+        return open(loc, "rb")
+
+
+# production-{ISO_A3}-{provider}-{YYYYMMDD}. Both middle fields are matched
+# non-greedily from the ends rather than assumed to be a three-letter code and a
+# single word: production-MEKONG-Servir Mekong-20251008 is neither, and a
+# stricter pattern silently drops it and every gauge it holds.
+_S3_PREFIX_RE = re.compile(r"^production-(.+)-(.+)-(\d{8})$")
+
+
+class S3GaugeSource:
+    """Gauges read directly from the private bucket, nothing downloaded.
+
+    The catalog is assembled from the per-provider catalog.csv files rather than
+    from master_catalog_with_metadata.xlsx, so no local input is needed at all.
+    Verified equivalent for scoring: across all 154 prefixes it carries 37,529
+    gauges to the xlsx's 37,528, final_river_id agrees on every gauge the two
+    share, and every one of the 2,626 gauges the VPU 714 baseline scores is
+    present.
+
+    Two things the bucket catalog does NOT have, both supplied by the xlsx when
+    one happens to be present (see `enrich_xlsx`) and simply absent otherwise:
+
+      Koppen group      no equivalent column, so the web page loses that
+                        grouping on a bucket-only run
+      840 reach matches CARAVAN gauges carry final_river_id = -1 in the bucket
+                        where the xlsx has a real reach -- 839 CARAVAN and 2
+                        DGRE out of 25,294 globally matched gauges. VPU 714
+                        loses 6 of 2,632 that way, but a CARAVAN-heavy VPU
+                        would lose far more. See KNOWN_ISSUES section S.
+    """
+
+    kind = "s3"
+
+    def __init__(self, profile: str | None = None,
+                 date_tag: str = GAUGE_DATE_TAG,
+                 enrich_xlsx: str | None = None):
+        self.enrich_xlsx = enrich_xlsx if (
+            enrich_xlsx and os.path.exists(enrich_xlsx)) else None
+        try:
+            import s3fs
+        except ImportError:
+            raise SystemExit(
+                "reading gauges from S3 needs s3fs, which is not installed:\n"
+                "  conda env update -f environment.yml\n"
+                "  (or pass --data-dir to read a local copy instead)")
+        self.date_tag = date_tag
+        self.profile = profile
+        # No profile pinned unless one was asked for: passing profile= makes boto
+        # consult the credentials file ONLY, which breaks env vars, instance
+        # roles and SSO. Left alone it runs the whole chain.
+        self.fs = s3fs.S3FileSystem(**({"profile": profile} if profile else {}))
+        self._prefixes = self._list_prefixes()
+
+    def describe(self) -> str:
+        s = f"s3://{GAUGE_BUCKET} @ {self.date_tag}"
+        if self.enrich_xlsx:
+            s += f" (+{os.path.basename(self.enrich_xlsx)})"
+        return s
+
+    def _list_prefixes(self) -> dict[tuple[str, str], str]:
+        """{(ISO_A3, provider): prefix} for this snapshot. Also the credential check.
+
+        This is the first call that touches the bucket, and it runs before the
+        model table and the zarr, so a credentials problem costs a second rather
+        than surfacing thirty seconds in as a botocore traceback -- or, worse,
+        as zero gauges found, which reads as an empty basin.
+        """
+        try:
+            names = self.fs.ls(f"{GAUGE_BUCKET}/production/")
+        except Exception as e:                                  # noqa: BLE001
+            raise SystemExit(self._access_error(e))
+
+        out, unparsed = {}, []
+        for p in names:
+            name = p.rstrip("/").rsplit("/", 1)[-1]
+            if not name.startswith("production-"):
+                continue
+            m = _S3_PREFIX_RE.match(name)
+            if not m:
+                unparsed.append(name)
+                continue
+            iso, provider, tag = m.groups()
+            if tag == self.date_tag:
+                out[(iso, provider)] = name
+        # Loud, not skipped: an unreadable prefix name means its gauges vanish
+        # from the catalog, and silently scoring fewer gauges is the failure this
+        # whole module is trying to avoid.
+        if unparsed:
+            raise SystemExit(
+                "cannot parse these gauge prefixes:\n"
+                + "".join(f"  {n}\n" for n in unparsed)
+                + "  expected production-<ISO_A3>-<provider>-<YYYYMMDD>")
+        if not out:
+            raise SystemExit(
+                f"no gauge prefixes carry the tag {self.date_tag} in "
+                f"s3://{GAUGE_BUCKET}/production/\n"
+                f"  found {len(names)} prefixes with other tags; pass "
+                f"--gauge-date-tag to pick one")
+        return out
+
+    @staticmethod
+    def _access_error(e: Exception) -> str:
+        """Turn a boto exception into something that says what to do about it."""
+        name, text = type(e).__name__, str(e)
+        head = f"cannot read s3://{GAUGE_BUCKET}/production/\n"
+        if "NoCredentials" in name or "Unable to locate credentials" in text:
+            return head + (
+                "  no AWS credentials found.\n"
+                "  Set one of: a [default] profile in ~/.aws/credentials,\n"
+                "  AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the environment,\n"
+                "  or pass --aws-profile <name>.\n"
+                "  To read a local copy instead, pass --data-dir.")
+        # Worth separating: a rejected key is a typo or a stale copy, while
+        # AccessDenied means the identity is real and simply is not allowed
+        # here. They call for different next steps and different people.
+        if "InvalidAccessKeyId" in text or "does not exist in our records" in text:
+            return head + (
+                f"  {text.strip()}\n"
+                "  The key itself was rejected -- check for a typo, or for a\n"
+                "  rotated key still sitting in ~/.aws/credentials or the\n"
+                "  environment. --aws-profile picks a different one.")
+        if "SignatureDoesNotMatch" in text:
+            return head + (
+                f"  {text.strip()}\n"
+                "  The key id is known but the secret does not match it.")
+        if "AccessDenied" in text or isinstance(e, PermissionError):
+            return head + (
+                f"  {text.strip()}\n"
+                "  The credentials are valid but do not reach this bucket. You need\n"
+                f"  s3:ListBucket on {GAUGE_BUCKET} and s3:GetObject on production/*.\n"
+                "  Ask whoever administers the GEOGLOWS account.\n"
+                "  To read a local copy instead, pass --data-dir.")
+        return head + f"  {name}: {text.strip()}"
+
+    def catalog(self) -> pd.DataFrame:
+        """Every gauge in the snapshot, from the per-provider catalog.csv files.
+
+        ISO_A3 and provider come from the prefix name, which is what makes this
+        backend independent of provider_for(): there is no free-text entity name
+        to normalize, because the bucket has already done it.
+        """
+        def read_one(item):
+            (iso, provider), prefix = item
+            with self.fs.open(f"{GAUGE_BUCKET}/production/{prefix}/catalog.csv") as f:
+                d = pd.read_csv(f)
+            d["ISO_A3"] = iso
+            d["provider"] = provider
+            d["_prefix"] = prefix
+            return d
+
+        with ThreadPoolExecutor(max_workers=GAUGE_WORKERS) as pool:
+            frames = list(pool.map(read_one, self._prefixes.items()))
+        cat = pd.concat(frames, ignore_index=True)
+
+        # catalog.csv flags which series a gauge actually has. Stage-only gauges
+        # are dropped here, before resolve() ever lists them -- the local backend
+        # can only discover this by opening the CSV and finding no `discharge`
+        # column, which is a read per gauge that this backend never pays.
+        if "discharge" in cat.columns:
+            has_q = cat["discharge"].fillna(0).astype("float64") > 0
+            n_stage = int((~has_q).sum())
+            cat = cat[has_q]
+            print(f"      {n_stage} stage-only gauges dropped from the catalog")
+        return self._enrich(cat)
+
+    def _enrich(self, cat: pd.DataFrame) -> pd.DataFrame:
+        """Fill in what the bucket catalog lacks, from a local xlsx if there is one.
+
+        Strictly additive, and skipped entirely when no xlsx is present -- the
+        bucket alone is the supported path. It exists because the xlsx carries
+        reach matches the bucket has not been given: 840 gauges, almost all
+        CARAVAN, are matched there and sentinel -1 here. Dropping them silently
+        would make a bucket run quietly score fewer gauges than a local one.
+
+        Koppen rides along for the same reason -- it is the other column the
+        bucket has no equivalent of.
+        """
+        if not self.enrich_xlsx:
+            return cat
+        x = pd.read_excel(self.enrich_xlsx)
+        key = lambda d: (d["ISO_A3"].astype(str).str.strip() + "_"      # noqa: E731
+                         + d["gauge_id"].map(_station_id))
+        x = x.assign(_k=key(x)).drop_duplicates("_k").set_index("_k")
+        cat = cat.assign(_k=key(cat))
+
+        cols = {}
+        if "Koppen Group (as of 2024)" in x.columns:
+            cols["koppen"] = cat["_k"].map(x["Koppen Group (as of 2024)"])
+        if "final_river_id" in x.columns:
+            # Only where the bucket has no match. The bucket wins wherever it
+            # has an opinion, so this can add gauges but never move one.
+            fallback = cat["_k"].map(x["final_river_id"])
+            unmatched = cat["final_river_id"].fillna(-1) <= 0
+            filled = cat["final_river_id"].where(~unmatched, fallback)
+            gained = int((unmatched & (filled.fillna(-1) > 0)).sum())
+            cols["final_river_id"] = filled
+            if gained:
+                print(f"      {gained} reach matches filled in from "
+                      f"{os.path.basename(self.enrich_xlsx)}")
+        return cat.assign(**cols).drop(columns="_k")
+
+    def resolve(self, g: pd.DataFrame) -> pd.DataFrame:
+        """Attach the S3 key for each gauge, dropping those with no object.
+
+        Lists measurements/ once per prefix this VPU touches -- ~1.7s each, seven
+        of them for VPU 714 -- rather than probing each gauge. That is both far
+        cheaper than a HEAD per gauge and a better answer: it distinguishes "not
+        published" from "not downloaded", which a local directory cannot.
+        """
+        g = g.copy()
+        g["station"] = g["gauge_id"].map(_station_id)
+        wanted = sorted({(iso, p) for iso, p in zip(g["ISO_A3"], g["provider"])})
+
+        def list_one(key):
+            prefix = self._prefixes[key]
+            base = f"{GAUGE_BUCKET}/production/{prefix}/measurements/"
+            try:
+                names = self.fs.ls(base)
+            except FileNotFoundError:
+                return key, base, set()
+            return key, base, {n.rsplit("/", 1)[-1][:-4] for n in names
+                               if n.endswith(".csv")}
+
+        with ThreadPoolExecutor(max_workers=GAUGE_WORKERS) as pool:
+            listed = {k: (base, have) for k, base, have in pool.map(list_one, wanted)}
+        print(f"      listed {len(wanted)} provider prefixes")
+
+        def loc_for(row):
+            base, have = listed[(row.ISO_A3, row.provider)]
+            return base + row.station + ".csv" if row.station in have else None
+
+        g["loc"] = [loc_for(r) for r in g.itertuples(index=False)]
+        # fname is the gauge's identity downstream -- it reaches the metrics
+        # parquet and both front ends -- so it keeps the local spelling even
+        # here, and a parquet from either backend stays interchangeable.
+        g["fname"] = (g["ISO_A3"].astype(str).str.strip() + "_"
+                      + g["provider"].astype(str).str.strip() + "_"
+                      + g["station"] + ".csv")
+        return g[g["loc"].notna()]
+
+    def locate(self, fname: str) -> str | None:
+        """The S3 key for a gauge named the way the metrics parquet names it.
+
+        This is resolve() in reverse, for the two front ends: they read the
+        parquet, which stores `fname` and no location, so a page can be built
+        from either backend regardless of which one scored it.
+
+        Split from the ends, not on every underscore: the ISO code and the
+        station id have none, but a provider may ('Servir Mekong' is already a
+        two-word name), so the middle is whatever is left between them.
+        """
+        parts = fname[:-4].split("_") if fname.endswith(".csv") else fname.split("_")
+        if len(parts) < 3:
+            return None
+        iso, station, provider = parts[0], parts[-1], "_".join(parts[1:-1])
+        prefix = self._prefixes.get((iso, provider))
+        if prefix is None:
+            return None
+        return f"{GAUGE_BUCKET}/production/{prefix}/measurements/{station}.csv"
+
+    def open(self, loc: str):
+        return self.fs.open(loc)
+
+
+def gauge_source(data_dir: str | None, kind: str | None = None,
+                 profile: str | None = None,
+                 date_tag: str = GAUGE_DATE_TAG):
+    """Pick a gauge backend. Explicit choice first, then whatever is available.
+
+    The rule is deliberately not "--data-dir means local": kge_map.py used to
+    need that directory for the catalog even when the CSVs came from elsewhere,
+    so tying the two together made the flag mean two things at once. What
+    selects local is a gauge directory actually being there.
+    """
+    d = data_dir or DATA_DIR
+    # Used only to top up what the bucket catalog lacks, and only if it is
+    # actually there -- an S3 run needs no local input.
+    xlsx = os.path.join(d, "master_catalog_with_metadata.xlsx")
+
+    if kind == "local":
+        return LocalGaugeSource(d)
+    if kind == "s3":
+        return S3GaugeSource(profile=profile, date_tag=date_tag,
+                             enrich_xlsx=xlsx)
+
+    # --aws-profile names a profile for THIS bucket and nothing else, so passing
+    # it is a statement of intent. Without this, pointing --data-dir at a
+    # directory that happens to hold gauge CSVs silently wins and the profile is
+    # ignored -- the run reads locally while the command line says otherwise.
+    if profile:
+        return S3GaugeSource(profile=profile, date_tag=date_tag,
+                             enrich_xlsx=xlsx)
+
+    if os.path.isdir(os.path.join(d, "routing", "gauge_data")):
+        return LocalGaugeSource(d)
+    return S3GaugeSource(profile=profile, date_tag=date_tag, enrich_xlsx=xlsx)
+
+
+def add_gauge_source_args(ap: argparse.ArgumentParser) -> None:
+    """The gauge-source flags, identical across all three scripts."""
+    ap.add_argument("--data-dir", default=DATA_DIR,
+                    help="directory holding master_catalog_with_metadata.xlsx "
+                         "and routing/gauge_data/. Defaults to "
+                         "$GEOGLOWS_EVAL_DATA. Used when gauges are read "
+                         "locally.")
+    ap.add_argument("--gauge-source", choices=("local", "s3"), default=None,
+                    help="where to read observed gauges from. Default: local if "
+                         "<data-dir>/routing/gauge_data/ exists, else s3.")
+    ap.add_argument("--aws-profile", default=None,
+                    help="named AWS profile for the gauge bucket. Omit to use "
+                         "the standard credential chain (default profile, "
+                         "environment variables, instance role).")
+    ap.add_argument("--gauge-date-tag", default=GAUGE_DATE_TAG,
+                    help=f"gauge snapshot to read from S3. Default {GAUGE_DATE_TAG}.")
+
+
+def source_from_args(args):
+    return gauge_source(args.data_dir, args.gauge_source,
+                        args.aws_profile, args.gauge_date_tag)
+
+
+def note_unused_data_dir(args, source) -> None:
+    """Say so when --data-dir was passed but cannot affect this run.
+
+    For serve.py and build_webapp.py ONLY. Under an S3 source the sole use of
+    --data-dir is the enrichment xlsx, and enrichment happens in catalog(),
+    which only build_gauge_table() calls -- so on those two scripts the flag is
+    inert while looking like it is doing something. kge_map.py must not call
+    this: there the same combination genuinely matters.
+    """
+    if source.kind == "s3" and args.data_dir != DATA_DIR:
+        print(f"note: --data-dir {args.data_dir} is not used here -- this "
+              f"script reads gauges by name from the metrics parquet and never "
+              f"builds a catalog.\n      It matters for kge_map.py (Koppen and "
+              f"reach matches) and when --gauge-source local.")
+
+
+def build_gauge_table(vpu: int, source) -> pd.DataFrame:
+    """Catalog gauges in `vpu` that have a real reach id, network attrs, and a CSV."""
+    print(f"[1/5] building gauge table for VPU {vpu} from {source.describe()}")
+
+    cat = source.catalog()
     n_all = len(cat)
     cat = cat.dropna(subset=["final_river_id"]).copy()
     cat["final_river_id"] = cat["final_river_id"].astype(int)
@@ -454,19 +881,24 @@ def build_gauge_table(vpu: int, catalog: str = CATALOG_PATH,
     g = cat.merge(model, left_on="final_river_id", right_on="LINKNO", how="inner")
     print(f"      {len(g)} catalog gauges fall in VPU {vpu}")
 
-    g["fname"] = g.apply(gauge_filename, axis=1)
-    g["path"] = g["fname"].map(lambda f: os.path.join(gauge_dir, f))
-    have = g["path"].map(os.path.exists)
-    print(f"      {int(have.sum())} of {len(g)} have a CSV on disk")
-    g = g[have]
+    # The backend attaches `loc` -- a path or an S3 key -- and drops gauges it
+    # has no CSV for. Which of those two it is, is the only difference between a
+    # local run and an S3 one from here on.
+    before = len(g)
+    g = source.resolve(g)
+    print(f"      {len(g)} of {before} have a CSV available")
 
     # Only columns that compute_metrics() carries into the metric rows. Anything
     # kept here but not listed in that st.update() call is silently dropped
     # before the parquet, so the two lists have to be changed together.
     keep = [
-        "final_river_id", "gauge_id", "fname", "path", "latitude", "longitude",
+        "final_river_id", "gauge_id", "fname", "loc", "latitude", "longitude",
         "ISO_A3", "river_name", "strmOrder", "USContArea",
-        "Koppen Group (as of 2024)",
+        # Two spellings on purpose: the xlsx's own column name, which the local
+        # backend passes through untouched, and the already-renamed one the S3
+        # backend produces when it fills Koppen in from an xlsx. Listing only
+        # the first silently dropped it from every enriched S3 run.
+        "Koppen Group (as of 2024)", "koppen",
     ]
     keep = [c for c in keep if c in g.columns]
     g = g[keep].rename(columns={"Koppen Group (as of 2024)": "koppen"})
@@ -746,18 +1178,33 @@ def framing_bbox(lon: pd.Series, lat: pd.Series,
     return x0, y0, x1, y1, outside
 
 
-def load_gauge_series(path: str) -> pd.Series | None:
+def load_gauge_series(loc: str, source=None) -> pd.Series | None:
     """Read one gauge CSV as a daily discharge series, or None if unusable.
 
     Returns None for stage-only files: a handful of catalog entries point at CSVs
     whose value column is `water_level`, not `discharge`.
+
+    ONE read, not two. This used to sniff the header with nrows=0 and then read
+    the file again, which is free against a local disk and doubles the transfer
+    against S3 -- two round trips per gauge, ~2,600 gauges a VPU. The columns are
+    checked on the frame that was already read instead.
+
+    `source` supplies the opener; without one `loc` is treated as a local path,
+    which is what lets callers that have not been given a source still work.
+    A None `loc` means the source could not place this gauge at all, which is
+    the same outcome as an unreadable file and is reported the same way.
     """
+    if loc is None:
+        return None
+    opener = source.open if source is not None else (lambda p: open(p, "rb"))
     try:
-        head = pd.read_csv(path, nrows=0)
-        if "discharge" not in head.columns:
+        with opener(loc) as fh:
+            d = pd.read_csv(fh)
+        if "discharge" not in d.columns or "datetime" not in d.columns:
             return None
-        d = pd.read_csv(path, usecols=["datetime", "discharge"],
-                        parse_dates=["datetime"])
+        d = d[["datetime", "discharge"]]
+        d["datetime"] = pd.to_datetime(d["datetime"], errors="coerce")
+        d = d[d["datetime"].notna()]
     except Exception:
         return None
     if d.empty:
@@ -1069,7 +1516,7 @@ def monthly_stats(both: pd.DataFrame) -> dict:
 
 
 def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
-                    min_years: float) -> pd.DataFrame:
+                    min_years: float, source=None) -> pd.DataFrame:
     """Pair each gauge against its reach and compute the metric table."""
     # The threshold counts PAIRED DAYS, not elapsed years: a gauge reporting
     # sparsely for thirty years can still fail it. Print the day count so the
@@ -1078,45 +1525,59 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
     print(f"[3/5] pairing {len(gauges)} gauges "
           f"(minimum {min_days:,} paired days = {min_years}y)")
 
-    rows, n_stage, n_short, n_empty = [], 0, 0, 0
-    for i, g in enumerate(gauges.itertuples(index=False), start=1):
-        if i % 500 == 0:
-            print(f"      {i}/{len(gauges)}")
+    # Reads run ahead of the arithmetic on a pool, because against S3 each one
+    # is ~0.2s of latency and there are thousands. executor.map keeps them in
+    # input order and streams rather than materialising every series at once, so
+    # the loop below, the progress counter and the skip tallies are unchanged --
+    # and a local run, where reads are already instant, is unaffected.
+    pool = ThreadPoolExecutor(max_workers=GAUGE_WORKERS)
+    try:
+        series = pool.map(load_gauge_series, gauges["loc"],
+                          [source] * len(gauges))
 
-        obs = load_gauge_series(g.path)
-        if obs is None:
-            n_stage += 1
-            continue
-        if g.final_river_id not in model.columns:
-            n_empty += 1
-            continue
+        rows, n_stage, n_short, n_empty = [], 0, 0, 0
+        for i, (g, obs) in enumerate(
+                zip(gauges.itertuples(index=False), series), start=1):
+            if i % 500 == 0:
+                print(f"      {i}/{len(gauges)}")
 
-        sim = model[g.final_river_id]
-        both = pd.concat([sim.rename("sim"), obs.rename("obs")], axis=1,
-                         join="inner").dropna()
-        if len(both) < min_days:
-            n_short += 1
-            continue
+            if obs is None:
+                n_stage += 1
+                continue
+            if g.final_river_id not in model.columns:
+                n_empty += 1
+                continue
 
-        st = pair_stats(both["sim"].to_numpy("float64"),
-                        both["obs"].to_numpy("float64"))
-        st.update(skill_scores(both))
-        # Thresholds from each series' whole record in the window; the
-        # contingency counts below still use the paired days only.
-        # sim is already indexed on model.index; only obs needs clipping to it.
-        st.update(contingency_stats(both, sim.dropna(),
-                                    obs.reindex(model.index).dropna()))
-        st.update(monthly_stats(both))
-        # Every gauge attribute that reaches the parquet is listed here. A column
-        # kept by build_gauge_table() but missing from this call is silently
-        # dropped, so the two lists have to be changed together.
-        st.update(final_river_id=g.final_river_id, gauge_id=g.gauge_id,
-                  fname=g.fname, latitude=g.latitude, longitude=g.longitude,
-                  strmOrder=g.strmOrder, USContArea=g.USContArea,
-                  koppen=getattr(g, "koppen", None), ISO_A3=g.ISO_A3,
-                  river_name=getattr(g, "river_name", None),
-                  first_day=both.index.min(), last_day=both.index.max())
-        rows.append(st)
+            sim = model[g.final_river_id]
+            both = pd.concat([sim.rename("sim"), obs.rename("obs")], axis=1,
+                             join="inner").dropna()
+            if len(both) < min_days:
+                n_short += 1
+                continue
+
+            st = pair_stats(both["sim"].to_numpy("float64"),
+                            both["obs"].to_numpy("float64"))
+            st.update(skill_scores(both))
+            # Thresholds from each series' whole record in the window; the
+            # contingency counts below still use the paired days only.
+            # sim is already indexed on model.index; only obs needs clipping to it.
+            st.update(contingency_stats(both, sim.dropna(),
+                                        obs.reindex(model.index).dropna()))
+            st.update(monthly_stats(both))
+            # Every gauge attribute that reaches the parquet is listed here. A
+            # column kept by build_gauge_table() but missing from this call is
+            # silently dropped, so the two lists have to be changed together.
+            st.update(final_river_id=g.final_river_id, gauge_id=g.gauge_id,
+                      fname=g.fname, latitude=g.latitude, longitude=g.longitude,
+                      strmOrder=g.strmOrder, USContArea=g.USContArea,
+                      koppen=getattr(g, "koppen", None), ISO_A3=g.ISO_A3,
+                      river_name=getattr(g, "river_name", None),
+                      first_day=both.index.min(), last_day=both.index.max())
+            rows.append(st)
+    finally:
+        # A SystemExit or Ctrl-C mid-loop otherwise waits on the pool's queued
+        # reads before the message appears.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     print(f"      kept {len(rows)}  |  skipped: {n_stage} stage-only, "
           f"{n_short} under {min_days:,} paired days, {n_empty} absent from the "
@@ -1248,9 +1709,13 @@ def summarize(m: pd.DataFrame) -> None:
     col = KGE_COL
     v = m[col].dropna()
     print(f"\n{'='*62}\n{col} summary over {len(v)} gauges\n{'='*62}")
+    # Percentiles only. The mean used to be printed here with a note not to
+    # report it, which mostly ensured it got reported: KGE' is unbounded below,
+    # so a single badly-scored gauge drags it past every percentile shown -- on
+    # VPU 714 the mean lands at -0.338 against a median of +0.267. p50 is the
+    # summary; a number nobody should quote does not need printing.
     for q in (0.05, 0.25, 0.50, 0.75, 0.95):
         print(f"  p{int(q*100):02d}  {v.quantile(q):8.3f}")
-    print(f"  mean {v.mean():8.3f}   (report the median instead; KGE is unbounded below)")
     print(f"\n  >= 0.75        {100*(v>=0.75).mean():5.1f}%")
     print(f"  >= 0.50        {100*(v>=0.50).mean():5.1f}%")
     print(f"  >= 0.00        {100*(v>=0.00).mean():5.1f}%")
@@ -1272,9 +1737,7 @@ def main() -> None:
     ap.add_argument("--refresh", action="store_true",
                     help="re-read the zarr instead of using the local cache")
     ap.add_argument("--outdir", default=OUTPUT_DIR)
-    ap.add_argument("--data-dir", default=DATA_DIR,
-                    help="directory holding master_catalog_with_metadata.xlsx "
-                         "and routing/gauge_data/. Defaults to $GEOGLOWS_EVAL_DATA.")
+    add_gauge_source_args(ap)
     ap.add_argument("--label", default=RUN_LABEL,
                     help="name for this run, shown on the web page")
     ap.add_argument("--warmup-years", type=int, default=0,
@@ -1288,9 +1751,11 @@ def main() -> None:
                          "mean. Set --label to name it.")
     args = ap.parse_args()
 
-    # Validated first: everything below either hits the network or takes minutes,
-    # and a wrong --data-dir should cost neither.
-    catalog, gauge_dir = data_paths(args.data_dir)
+    # Resolved first: everything below either hits the network or takes minutes,
+    # and neither a wrong --data-dir nor a missing credential should cost that.
+    # Constructing the source is itself the check -- the local backend stats its
+    # inputs, the S3 one lists the bucket.
+    source = source_from_args(args)
 
     if args.start is None or args.end is None:
         # Resolve the default window from whichever source is actually being
@@ -1309,7 +1774,7 @@ def main() -> None:
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    gauges = build_gauge_table(args.vpu, catalog, gauge_dir)
+    gauges = build_gauge_table(args.vpu, source)
     if args.model_parquet:
         model = model_q_from_parquet(args.model_parquet,
                                      gauges["final_river_id"].to_numpy(),
@@ -1345,7 +1810,7 @@ def main() -> None:
         print(f"      warm-up: dropped the first {args.warmup_years}y, "
               f"scoring {args.start} .. {args.end} ({len(model):,} days)")
 
-    metrics = compute_metrics(gauges, model, args.min_years)
+    metrics = compute_metrics(gauges, model, args.min_years, source)
 
     pq = os.path.join(args.outdir, f"vpu{args.vpu}_metrics.parquet")
     print(f"[4/5] writing {len(metrics)} rows -> {pq}")
@@ -1371,6 +1836,12 @@ def main() -> None:
             "warmup_years": args.warmup_years,
             "min_years": args.min_years,
             "n_gauges": int(len(metrics)),
+            # Which observations were scored. A local directory carries no
+            # version of its own, so without this the same command can produce
+            # different numbers from a re-downloaded copy with nothing saying
+            # so; for S3 the snapshot tag pins it exactly.
+            "gauge_source": source.kind,
+            "gauge_source_detail": source.describe(),
             "kge_col": KGE_COL,
             "kge_label": KGE_LABEL,
             "kge_no_skill": KGE_NO_SKILL,

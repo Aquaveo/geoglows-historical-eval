@@ -11,38 +11,69 @@ Currently scoped to **VPU 714** (Missouri/Mississippi) as a demo.
 
 ## What you need before running
 
-Two inputs the scripts do not fetch:
+**Gauge observations** — one CSV per gauge, columns `datetime,discharge`.
 
-- `master_catalog_with_metadata.xlsx` — the gauge catalog, with `final_river_id`, `gauge_id`,
-  `ISO_A3`, `latitude`, `longitude`
-- `routing/gauge_data/*.csv` — one CSV per gauge, columns `datetime,discharge`, named
-  `{ISO_A3}_{provider}_{station}.csv`
+These are read straight from S3 by default; nothing is downloaded and nothing is cached.
+The bucket (`master-gauge-data`) is private, so you need AWS credentials with
+`s3:ListBucket` on it and `s3:GetObject` on `production/*`. Ask whoever administers the
+GEOGLOWS account.
 
-Both live under one directory. **There is no default** — set `$GEOGLOWS_EVAL_DATA` or pass
-`--data-dir`. All three scripts check it before doing any other work, so a wrong path fails
-immediately rather than looking like missing gauge data. These are designed to be downloaded from
-the gauge data that we have on AWS. You must have them downloaded locally to be able to access them.
+Credentials are picked up the usual way — a `[default]` profile, `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` in the environment, an attached instance role, or
+`--aws-profile some-name`. Check yours works before running anything; if this works, the
+scripts will work:
 
-The model side needs nothing prepared — the GEOGLOWS retrospective zarr is read from S3. Or it can
-read your own input.
+```bash
+aws s3 ls s3://master-gauge-data/production/ --profile your-profile
+```
+
+If you already have the CSVs, point `--data-dir` (or `$GEOGLOWS_EVAL_DATA`) at the folder
+holding `routing/gauge_data/`. Local is used automatically when that folder is there, and
+it is faster. `--gauge-source local` or `--gauge-source s3` forces the choice either way.
+
+**The gauge catalog is optional.** The bucket publishes its own catalog, so nothing local
+is required. But `master_catalog_with_metadata.xlsx` carries two things the bucket does
+not, and is used automatically for them if it is present under `--data-dir`:
+
+- Köppen climate group, one of the groupings on the web page
+- reach matches for 840 gauges — almost all CARAVAN — that the bucket marks unmatched
+
+Runs without it work and simply score slightly fewer gauges, with no Köppen grouping.
+Which source ran is recorded in `vpu<VPU>_run.json`, along with the bucket snapshot date,
+so two sets of results are either comparable or provably not.
+
+**The model** — nothing to prepare. The GEOGLOWS retrospective zarr is public HTTP with no
+credentials, or pass `--model-parquet` to score your own run.
 
 ## Running it
 
-Set the data directory once, so every script finds it in this and future shells:
+```bash
+conda env create -f environment.yml && conda activate geoglows-eval
+```
+
+With bucket credentials and nothing downloaded:
+
+```bash
+python kge_map.py --vpu 714 --aws-profile your-profile
+```
+
+```bash
+python build_webapp.py --vpu 714 --aws-profile your-profile
+```
+
+```bash
+python serve.py --vpu 714 --aws-profile your-profile
+```
+
+`kge_map.py` writes the metrics, run config and static map; `build_webapp.py` turns those
+into one self-contained HTML page; `serve.py` serves the same page live on :8765 with
+daily hydrographs, which are too large to embed.
+
+Reading a local copy instead — set it once so every script finds it in this and future
+shells, since `export` on its own only lasts for the current terminal:
 
 ```bash
 echo 'export GEOGLOWS_EVAL_DATA=/path/to/your/gauge/data' >> ~/.bashrc && source ~/.bashrc
-```
-
-`export` on its own only lasts for the current terminal. Every script also takes
-`--data-dir` if you would rather pass it explicitly.
-
-```bash
-conda env create -f environment.yml && conda activate geoglows-eval
-
-python kge_map.py --vpu 714          # metrics + run config + static map
-python build_webapp.py --vpu 714     # one self-contained HTML page
-python serve.py --vpu 714            # or the live local app on :8765
 ```
 
 Scoring a different model, into its own directory so the baseline survives:

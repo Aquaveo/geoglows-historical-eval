@@ -24,12 +24,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 
-from kge_map import (CACHE_DIR, DATA_DIR, DATE_END, DATE_START, KGE_NO_SKILL,
-                     RUN_LABEL, data_paths, framing_bbox, load_gauge_series)
+from kge_map import (CACHE_DIR, DATE_END, DATE_START, GAUGE_WORKERS,
+                     KGE_NO_SKILL, RUN_LABEL, add_gauge_source_args,
+                     framing_bbox, load_gauge_series, note_unused_data_dir,
+                     source_from_args)
 
 # Exceedance probabilities (%) for the flow-duration curve. Denser in the tails,
 # because that is where the interesting model failures live.
@@ -70,17 +73,31 @@ def load_model_cache(vpu: int, start: str, end: str) -> pd.DataFrame:
     )
 
 
-def gauge_curves(metrics: pd.DataFrame, model: pd.DataFrame,
-                 gauge_dir: str) -> dict:
-    """Flow-duration curve and monthly regime per gauge, on the paired sample."""
-    print(f"[2/4] computing curves for {len(metrics)} gauges")
+def gauge_curves(metrics: pd.DataFrame, model: pd.DataFrame, source) -> dict:
+    """Flow-duration curve and monthly regime per gauge, on the paired sample.
+
+    The metrics parquet stores each gauge's `fname`, its identity, not where its
+    CSV lives -- so a parquet scored from S3 can be rebuilt into a page from a
+    local copy and the other way round. The source resolves that name to a
+    location here.
+    """
+    print(f"[2/4] computing curves for {len(metrics)} gauges "
+          f"from {source.describe()}")
     q_levels = [1.0 - p / 100.0 for p in FDC_EXCEED]  # exceedance -> quantile
     curves = {}
 
-    for i, row in enumerate(metrics.itertuples(index=False), start=1):
+    locs = [source.locate(f) for f in metrics["fname"]]
+    # Same reason as the pairing loop in kge_map: against S3 these are thousands
+    # of ~0.2s round trips, and reading them on a pool turns eight minutes into
+    # under one. Order is preserved, so the progress counter still means what it
+    # says.
+    with ThreadPoolExecutor(max_workers=GAUGE_WORKERS) as pool:
+        series = pool.map(load_gauge_series, locs, [source] * len(locs))
+
+    for i, (row, obs) in enumerate(
+            zip(metrics.itertuples(index=False), series), start=1):
         if i % 500 == 0:
             print(f"      {i}/{len(metrics)}")
-        obs = load_gauge_series(os.path.join(gauge_dir, row.fname))
         if obs is None or row.final_river_id not in model.columns:
             continue
         both = pd.concat([model[row.final_river_id].rename("sim"),
@@ -178,16 +195,14 @@ def main() -> None:
     # naming a different run than the metrics came from. Passing it renames the
     # page without recomputing anything.
     ap.add_argument("--label", default=None)
-    ap.add_argument("--data-dir", default=DATA_DIR,
-                    help="directory holding master_catalog_with_metadata.xlsx "
-                         "and routing/gauge_data/. Defaults to $GEOGLOWS_EVAL_DATA.")
+    add_gauge_source_args(ap)
     args = ap.parse_args()
 
-    # Same reason as serve.py: the curves are built from the gauge CSVs, and a
-    # wrong data dir would quietly produce a page with no observed curves at all.
-    # Take the resolved gauge_dir rather than the module-level GAUGE_DIR, which
-    # was fixed from the environment at import time and cannot see --data-dir.
-    _, gauge_dir = data_paths(args.data_dir)
+    # Same reason as serve.py: the curves are built from the gauge CSVs, and an
+    # unreachable source would quietly produce a page with no observed curves at
+    # all. Resolving it here fails immediately instead.
+    source = source_from_args(args)
+    note_unused_data_dir(args, source)
 
     metrics_path = args.metrics or f"outputs/vpu{args.vpu}_metrics.parquet"
     out_path = args.out or f"outputs/vpu{args.vpu}_explorer.html"
@@ -228,7 +243,7 @@ def main() -> None:
     if len(model) != before:
         print(f"      warm-up trim: {before - len(model)} days dropped, "
               f"{len(model)} scored from {args.start}")
-    curves = gauge_curves(m, model, gauge_dir)
+    curves = gauge_curves(m, model, source)
 
     *bbox, n_outside = framing_bbox(m.longitude, m.latitude)
     bbox = tuple(bbox)
