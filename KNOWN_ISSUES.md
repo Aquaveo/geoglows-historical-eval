@@ -46,21 +46,21 @@ unmatched sentinels, not reaches. Usable global catalog is ~25,700 gauges.
 
 `DEFER`
 
-5 of the 2,632 VPU 714 files have a `water_level` column instead of `discharge`:
-`CAN_HYDAT_11AB080`, `CAN_HYDAT_11AE013`, `USA_USGS_3153500`, `USA_USGS_6805000`,
-`USA_USGS_7344210`. Globally the catalog flags 8,218 gauges with `water_level` and 1,258
-*without* `discharge`.
+5 of the 2,632 VPU 714 files have a `water_level` column instead of `discharge` — 2 HYDAT and
+3 USGS. Globally the catalog flags 8,218 gauges with `water_level` and 1,258 *without*
+`discharge`.
 
 - **Impact**: minor — 5 of 2,632 in VPU 714. Usable discharge gauges = **2,627**.
-- **Deferred decision**: trust the catalog's `discharge` / `water_level` flags to pre-filter,
-  rather than discovering it at read time. For the demo, skip any file whose columns aren't
-  `datetime,discharge`.
+- **Resolved for S3 runs**: the bucket's per-provider `catalog.csv` carries `discharge` and
+  `water_level` flags, and `S3GaugeSource.catalog()` now drops stage-only gauges before any
+  file is opened — 4,182 of them globally. A local run still discovers it at read time, by
+  finding no `discharge` column.
 
 ## 4. Multiple gauges on one reach — no dedup policy
 
 `DEFER`
 
-VPU 714: 30 reaches carry more than one gauge (61 gauges involved; reach `760544961` has 3).
+VPU 714: 30 reaches carry more than one gauge (61 gauges involved; the worst carries 3).
 Globally: 1,213 reaches, 14,334 gauge rows.
 
 - **Impact**: small in VPU 714, but it means the same model series is scored more than once,

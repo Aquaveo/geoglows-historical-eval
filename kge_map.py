@@ -464,9 +464,11 @@ def gauge_filename(row: pd.Series) -> str:
 def _station_id(v) -> str:
     """gauge_id as it appears in a filename or an S3 key.
 
-    pandas reads numeric gauge ids as floats, so USGS 10011200 arrives as
-    '10011200.0' and would match nothing. Both backends key on this, so they
-    have to strip it the same way.
+    pandas reads all-numeric gauge ids as floats, so an id like 12345678 arrives
+    as '12345678.0' and would match nothing. Alphanumeric ids -- Canadian HYDAT
+    station codes, for instance -- are unaffected, which is why this cannot just
+    be an int cast. Both backends key on this, so they have to strip it the same
+    way.
     """
     s = str(v).strip()
     return s[:-2] if s.endswith(".0") else s
@@ -847,8 +849,9 @@ def build_gauge_table(vpu: int, source) -> pd.DataFrame:
     keep = [c for c in keep if c in g.columns]
     g = g[keep].rename(columns={"Koppen Group (as of 2024)": "koppen"})
 
-    # gauge_id mixes numeric USGS ids with alphanumeric ones (e.g. Canadian
-    # '11AA005'), so pandas infers `object`; force str for a clean parquet schema.
+    # gauge_id mixes numeric USGS ids with alphanumeric ones (Canadian HYDAT
+    # codes, for instance), so pandas infers `object`; force str for a clean
+    # parquet schema.
     for c in ("gauge_id", "koppen", "river_name", "ISO_A3"):
         if c in g.columns:
             g[c] = g[c].astype(str)
