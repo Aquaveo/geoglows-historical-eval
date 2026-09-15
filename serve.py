@@ -49,7 +49,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # One source file for both deployments. Served with the __DATA__ placeholder
 # intact, which is how the page knows to run live against /api.
 APP_HTML = os.path.join(HERE, "webapp", "explorer.html")
-BASEMAP_CACHE = os.path.join(HERE, "cache", "basemap_vpu{vpu}.json")
+# v2 in the name on purpose: the layer set changed when the whole-globe `world`
+# outline was added, and a cache written before that is missing it silently --
+# the map would simply refuse to show anything when zoomed out. Bump this
+# whenever basemap_paths() gains or drops a layer.
+BASEMAP_CACHE = os.path.join(HERE, "cache", "basemap_v2_vpu{vpu}.json")
 
 # Half-width of the centred, circular smoothing window applied to the observed
 # day-of-year climatology. Raw DOY means are noisy at a single gauge; ~15 days

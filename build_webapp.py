@@ -164,7 +164,52 @@ def basemap_paths(bbox: tuple[float, float, float, float]) -> dict:
                     lines.append([[r4(x), r4(y)] for x, y in coords])
         out[name] = lines
         print(f"      {name}: {len(lines)} polylines")
+
+    out["world"] = world_outline()
     return out
+
+
+# Coarse enough to be cheap, detailed enough to recognise a continent. Measured
+# whole-globe coastline + country borders: 110m at 0.25 deg is 467 polylines and
+# 72 KB of JSON, against a 7.5 MB payload. 50m would be 213 KB for detail that is
+# invisible at the zoom this layer is drawn at.
+WORLD_RES, WORLD_TOL = "110m", 0.25
+
+
+def world_outline() -> list:
+    """Whole-globe coastline and country borders, for the zoomed-out view.
+
+    The other layers are clipped to the VPU's bounding box, so before this there
+    was nothing to see outside it -- which is why the map could not be zoomed out
+    past the basin. This is the context layer that makes "where on Earth is this"
+    answerable; explorer.html draws it only below the VPU-fit zoom.
+
+    Coordinates round to 2 decimals, not the r4() used elsewhere: ~1 km, which is
+    finer than the simplification tolerance and far finer than this is ever drawn.
+    """
+    import cartopy.io.shapereader as shpreader
+
+    lines = []
+    for cat, ne_name in (("physical", "coastline"),
+                         ("cultural", "admin_0_boundary_lines_land")):
+        try:
+            path = shpreader.natural_earth(resolution=WORLD_RES, category=cat,
+                                           name=ne_name)
+            geoms = list(shpreader.Reader(path).geometries())
+        except Exception as exc:                       # pragma: no cover
+            print(f"      skipped world/{ne_name}: {exc}")
+            continue
+        for g in geoms:
+            g = g.simplify(WORLD_TOL, preserve_topology=True)
+            if g.is_empty:
+                continue
+            for part in (g.geoms if hasattr(g, "geoms") else [g]):
+                coords = (list(part.exterior.coords)
+                          if part.geom_type == "Polygon" else list(part.coords))
+                if len(coords) > 1:
+                    lines.append([[round(x, 2), round(y, 2)] for x, y in coords])
+    print(f"      world: {len(lines)} polylines")
+    return lines
 
 
 METRIC_FIELDS = [

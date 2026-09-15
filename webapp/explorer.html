@@ -735,6 +735,15 @@ const cv = document.getElementById("map"), ctx = cv.getContext("2d");
 let W=0, H=0, base=1, ox=0, oy=0, KX=1, BX0=0, BY0=0, BX1=1, BY1=1;
 const view = { s:1, tx:0, ty:0 };
 
+// s = 1 is "the VPU fills the viewport", and it used to be the hard floor -- so
+// the map could not be zoomed out far enough to show where on Earth the basin
+// is. MIN_S is instead the scale at which the WHOLE GLOBE fits, which depends on
+// how big this VPU is: a basin spanning 35 deg reaches it around s = 0.09, a
+// small one an order of magnitude lower. Capped at 1 so a hypothetical
+// world-spanning VPU still gets a sane floor rather than one above its own fit.
+let MIN_S = 1;
+const MAX_S = 40;
+
 function fit() {
   const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   W = r.width; H = r.height;
@@ -744,7 +753,11 @@ function fit() {
   base = Math.min((W-56)/w, (H-56)/h);
   ox = W/2 - ((BX0+BX1)/2)*KX*base;
   oy = H/2 + ((BY0+BY1)/2)*base;
+  // 360 deg of longitude and 180 of latitude, with a margin so the globe does
+  // not sit exactly edge to edge.
+  MIN_S = Math.min(1, 0.92*Math.min(W/(360*KX*base), H/(180*base)));
 }
+const clampS = s => Math.max(MIN_S, Math.min(MAX_S, s));
 const px = lon => (lon*KX*base + ox)*view.s + view.tx;
 const py = lat => (oy - lat*base)*view.s + view.ty;
 
@@ -782,7 +795,9 @@ function viewBounds() {
 }
 
 function requestStreams() {
-  if (!SV.on || !D || W < 2 || H < 2) return;
+  // Not below the VPU's own fit: the reach network is meaningless at continental
+  // zoom and the request would ask the service for a whole hemisphere of it.
+  if (!SV.on || !D || W < 2 || H < 2 || view.s < 1) { SV.img = null; return; }
   const b = viewBounds();
   const key = b.map(v => v.toFixed(4)).join(",");
   if (SV.pending === key || (SV.box && SV.box.key === key)) return;
@@ -847,6 +862,13 @@ function draw() {
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = cssVar("--land"); ctx.fillRect(0,0,W,H);
   const bm = D.basemap || {};
+  // Global context, drawn only once zoomed out past the VPU's own fit. Above
+  // that it would double every coastline the detailed layers already draw, at a
+  // coarser tolerance; below it, it is the only thing out there to see.
+  // Muted ink, not a rule colour: the rule tokens are tuned for hairlines inside
+  // panels and wash out completely against the map surface at this zoom, which
+  // left the continents barely visible and the whole layer pointless.
+  if (view.s < 1) drawLines(bm.world, cssVar("--ink-3"), 0.8);
   drawLines(bm.lakes,     cssVar("--rule"),   0.8);
   drawLines(bm.states,    cssVar("--rule-2"), 0.7);
   // Country borders heavier than sub-national ones and drawn after them, so the
@@ -1629,12 +1651,12 @@ cv.addEventListener("pointerleave", () => { tip.classList.remove("on");
 cv.addEventListener("wheel", e => {
   e.preventDefault();
   const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
-  const ns = Math.max(1, Math.min(40, view.s*Math.exp(-e.deltaY*0.0016))), f = ns/view.s;
+  const ns = clampS(view.s*Math.exp(-e.deltaY*0.0016)), f = ns/view.s;
   view.tx = mx-(mx-view.tx)*f; view.ty = my-(my-view.ty)*f; view.s = ns; draw(); scheduleStreams();
 }, {passive:false});
 
 function zoomBy(k) {
-  const ns = Math.max(1, Math.min(40, view.s*k)), f = ns/view.s;
+  const ns = clampS(view.s*k), f = ns/view.s;
   view.tx = W/2-(W/2-view.tx)*f; view.ty = H/2-(H/2-view.ty)*f; view.s = ns; draw();
   scheduleStreams();
 }
