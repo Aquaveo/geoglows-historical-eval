@@ -613,8 +613,9 @@ Measured on the 2,585-gauge run:
 | under 60% | 149 |
 | under 40% | 21 |
 
-Worst cases: gauge 6700000 has 4,619 paired days spread over 82 years (15% dense); gauges
-6610750 and 6610792 have 5,167 days over 74 years (19%).
+Worst cases run to about 4,600 paired days spread over 82 years (15% dense) and 5,200 days
+over 74 years (19%). Individual stations are not named here — see the note on gauge
+identifiers at the end of this file.
 
 Whether this matters depends on the metric. For KGE', r and the error magnitudes a day is a day
 and sparseness is harmless. It is not harmless for anything seasonal, and it interacts with
@@ -661,8 +662,9 @@ and CARAVAN is an aggregation that republishes national datasets under prefixed 
 
 Strip the prefix and **492 of the 839 already exist in the bucket, matched, under their native
 provider** (HYDAT 308, BoM 118, ANA 65, SENAMHI 1) — and **353 of those resolve to the same
-reach**. For example `camelsaus_105105A` and BoM `105105A` both carry `final_river_id`
-540626550. The `-1` on CARAVAN is deliberate de-duplication.
+reach**. The pattern is exact: a CARAVAN id is its native id with a source prefix bolted on,
+so `<prefix>_<native id>` and `<native id>` are one station carrying one `final_river_id`
+between them. The `-1` on CARAVAN is deliberate de-duplication.
 
 ### Why overriding it was worse than doing nothing
 
@@ -718,3 +720,24 @@ name.
 - **SABER / locally-applied bias correction** is out of scope for now; the version-comparison
   machinery (paired per-gauge differences, change maps, improved-vs-degraded counts) will
   handle it when it arrives.
+
+---
+
+## A note on gauge identifiers in this file
+
+**Individual gauges are not named here, and observed data of any kind stays out of this
+repository.** The observations are licensed by the agencies that collect them and are not ours
+to redistribute, in raw or derived form.
+
+What that rules out: station ids, coordinates, and any figure attached to a named station.
+Earlier revisions of this file carried a handful of each; they were removed, and the findings
+they illustrated are stated without them above.
+
+What it does not rule out: statistics pooled across the whole run — medians, counts,
+percentile tables, the share of gauges past a threshold. Those are the substance of an
+evaluation and identify no station. If a future measurement only makes sense with an example
+station attached, describe the pattern instead, as the CARAVAN prefix note does.
+
+`.gitignore` enforces the file side of this — `*.csv`, `*.parquet`, `*.xlsx`, `*.npz`,
+`routing/` and any built `*_explorer.html`, which inlines every gauge's flow-duration curve
+and monthly regime. The only HTML that is source is `webapp/explorer.html`, the template.

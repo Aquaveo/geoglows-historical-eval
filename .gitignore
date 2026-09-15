@@ -21,9 +21,34 @@ ideas.docx
 *:Zone.Identifier
 
 # Credentials. Nothing here writes these -- AWS keys are read from boto's own
-# chain, outside the working directory -- but this repository is public and a
-# stray copy must not become a commit.
+# chain, outside the working directory -- but a stray copy must not become a
+# commit.
 .env
 .aws/
 credentials
 *.pem
+
+# Observed gauge data and anything derived from it. NO GAUGE DATA GOES IN THIS
+# REPOSITORY, in any form: the observations are licensed by their providers and
+# are not ours to redistribute.
+#
+# The rules above already cover cache/ and outputs*/, which is where the scripts
+# write by default. These cover the case they cannot: --out, --outdir and
+# --data-dir all take arbitrary paths, so a built page or a metrics table can
+# land anywhere in the tree and nothing directory-shaped would catch it. A built
+# explorer page is ~7 MB with every gauge's flow-duration curve and monthly
+# regime inlined.
+*.parquet
+*.npz
+*.csv
+*.xlsx
+*.xls
+*.nc
+*.gpkg
+*_explorer.html
+routing/
+
+# The one HTML that IS source: the template, ~120 KB, carrying the __DATA__
+# placeholder and no observations. Everything else matching *_explorer.html is a
+# build artefact.
+!webapp/explorer.html
