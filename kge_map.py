@@ -783,13 +783,31 @@ def gauge_source(data_dir: str | None, kind: str | None = None,
     if profile:
         return S3GaugeSource(profile=profile, date_tag=date_tag)
 
+    # Two different mistakes, and saying which one it was is most of the value:
+    # a path was given and is wrong, or no path was given at all and "data" is
+    # the placeholder default resolving against the current directory. The
+    # second is the common one and reads as nonsense without this.
+    looked = os.path.abspath(os.path.join(d, "routing", "gauge_data"))
+    # NOT `data_dir is None`: argparse defaults --data-dir to DATA_DIR, so an
+    # unset flag arrives as the placeholder string rather than None. Unconfigured
+    # means the env var is absent AND nothing overrode the placeholder.
+    if ("GEOGLOWS_EVAL_DATA" not in os.environ
+            and (data_dir is None or data_dir == DATA_DIR)):
+        why = ("  No gauge directory has been configured: neither --data-dir nor\n"
+               f"  $GEOGLOWS_EVAL_DATA is set, so this fell back to ./{DATA_DIR}/ and\n"
+               f"  looked in\n    {looked}\n")
+    else:
+        why = f"  looked in\n    {looked}\n"
+
     raise SystemExit(
         "no local gauge data, and nothing asked for S3.\n"
-        f"  looked for: {os.path.join(d, 'routing', 'gauge_data')}\n"
-        "\n"
-        "  Preferred -- use a local copy:\n"
-        "    point --data-dir (or $GEOGLOWS_EVAL_DATA) at a directory holding\n"
-        "    routing/gauge_data/*.csv\n"
+        + why
+        + "\n"
+        "  Preferred -- point it at a local copy, once, for every future shell:\n"
+        "    echo 'export GEOGLOWS_EVAL_DATA=/path/to/gauge/data' >> ~/.bashrc\n"
+        "    source ~/.bashrc\n"
+        "  or pass --data-dir /path/to/gauge/data for this run only. Either way the\n"
+        "  directory must hold routing/gauge_data/*.csv\n"
         "\n"
         "  Or read from the private bucket, which needs credentials that reach it:\n"
         f"    --gauge-source s3   (bucket: {GAUGE_BUCKET})\n")
