@@ -11,29 +11,51 @@ Currently scoped to **VPU 714** (Missouri/Mississippi) as a demo.
 
 ## What you need before running
 
-**Gauge observations** — one CSV per gauge, columns `datetime,discharge`.
+**Gauge observations** — one CSV per gauge, columns `datetime,discharge`, named
+`{ISO_A3}_{provider}_{station}.csv`.
 
-These are read straight from S3 by default; nothing is downloaded and nothing is cached.
-The bucket (`master-gauge-data`) is private, so you need AWS credentials with
-`s3:ListBucket` on it and `s3:GetObject` on `production/*`. 
+**Use a local copy. This is the recommended way and the default.** Put the CSVs under
+`routing/gauge_data/` and point `--data-dir` at the directory above it, or set
+`$GEOGLOWS_EVAL_DATA` once:
 
-Credentials are picked up the usual way — a `[default]` profile, `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY` in the environment, an attached instance role, or
-`--aws-profile some-name`. Check yours works before running anything; if this works, the
-scripts will work:
+```bash
+echo 'export GEOGLOWS_EVAL_DATA=/path/to/your/gauge/data' >> ~/.bashrc && source ~/.bashrc
+```
+
+Local is faster — about 15 ms a gauge against 20 ms threaded and 148 ms unthreaded — needs no
+credentials, and works offline. Nothing else has to be configured: if
+`<data-dir>/routing/gauge_data/` exists, that is what gets read.
+
+You also need `master_catalog_with_metadata.xlsx` in the same directory for a local run. It
+supplies `final_river_id`, `gauge_id`, `ISO_A3`, `latitude`, `longitude`, and the Köppen group
+the page groups by.
+
+### Reading from S3 instead
+
+The gauges are also published to a **private** bucket, `master-gauge-data`. Reading from it is
+**opt-in and never happens by default** — if there is no local data and you have not asked for
+S3, the run stops and tells you so rather than reaching for the network.
+
+Most people cannot reach this bucket. You need AWS credentials carrying `s3:ListBucket` on it
+and `s3:GetObject` on `production/*`. Check yours before running anything:
 
 ```bash
 aws s3 ls s3://master-gauge-data/production/ --profile your-profile
 ```
 
-If you already have the CSVs, point `--data-dir` (or `$GEOGLOWS_EVAL_DATA`) at the folder
-holding `routing/gauge_data/`. Local is used by default when that folder is there, and
-it is faster. Otherwise, aws will be used by default. `--gauge-source local` or `--gauge-source s3` forces the choice either way. The flag is optional
+Then ask for it explicitly, either way round:
 
-**Reading from S3 needs nothing local at all**
+```bash
+python kge_map.py --vpu 714 --gauge-source s3 --aws-profile your-profile
+```
 
-Which source ran is recorded in `vpu<VPU>_run.json`, along with the bucket snapshot date, so
-two sets of results are either comparable or provably not.
+Credentials come from the usual chain — a `[default]` profile, `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`, an instance role, or `--aws-profile`. An S3 run reads nothing local,
+so it needs no catalog and `--data-dir` has no effect on it; it also has no Köppen grouping,
+since the bucket's catalog carries no such column.
+
+Whichever ran is recorded in `vpu<VPU>_run.json`, with the bucket snapshot date for S3 runs,
+so two sets of results are either comparable or provably not.
 
 **The model** — nothing to prepare. The GEOGLOWS retrospective zarr is public HTTP with no
 credentials, or pass `--model-parquet` to score your own run from a local source.
@@ -48,13 +70,13 @@ Score the model. This always comes first, and writes the metrics parquet, the ru
 static PNG map into `outputs/`:
 
 ```bash
-python kge_map.py --vpu 714 --aws-profile your-profile
+python kge_map.py --vpu 714
 ```
 
 Then look at the results — **start the server**:
 
 ```bash
-python serve.py --vpu 714 --aws-profile your-profile
+python serve.py --vpu 714
 ```
 
 Open <http://localhost:8765>. This is the way to use the tool day to day: it is the full
@@ -67,7 +89,7 @@ click. It never writes a file, so re-running it costs nothing.
 viewing the same metrics parquet, and most of the time you will not need it:
 
 ```bash
-python build_webapp.py --vpu 714 --aws-profile your-profile
+python build_webapp.py --vpu 714
 ```
 
 It bakes everything into one HTML file — data, charts, basemap, all inlined — that opens in
@@ -83,14 +105,7 @@ neither script needs the other to have run.
 | Use it | **by default** | only to hand a result to someone |
 | Output | a local server on :8765 | one portable HTML file |
 | Daily hydrographs | yes | no |
-| Viewer needs Python + AWS | yes | no |
-
-Reading a local copy of the gauges instead — set it once so every script finds it in this and
-future shells, since `export` on its own only lasts for the current terminal:
-
-```bash
-echo 'export GEOGLOWS_EVAL_DATA=/path/to/your/gauge/data' >> ~/.bashrc && source ~/.bashrc
-```
+| Viewer needs Python and the gauge data | yes | no |
 
 ## Comparing several model runs
 
@@ -100,21 +115,21 @@ except the gauges they are scored against.
 **Score each one into its own `--outdir`**, or the second overwrites the first:
 
 ```bash
-python kge_map.py --vpu 714 --aws-profile your-profile
+python kge_map.py --vpu 714
 ```
 
 ```bash
-python kge_map.py --vpu 714 --model-parquet routed.parquet --label "routing v7" --warmup-years 1 --outdir outputs_v7 --aws-profile your-profile
+python kge_map.py --vpu 714 --model-parquet routed.parquet --label "routing v7" --warmup-years 1 --outdir outputs_v7
 ```
 
 **Then serve each on its own port** and put the two browser tabs side by side:
 
 ```bash
-python serve.py --vpu 714 --port 8765 --aws-profile your-profile
+python serve.py --vpu 714 --port 8765
 ```
 
 ```bash
-python serve.py --vpu 714 --metrics outputs_v7/vpu714_metrics.parquet --port 8766 --aws-profile your-profile
+python serve.py --vpu 714 --metrics outputs_v7/vpu714_metrics.parquet --port 8766
 ```
 
 `--label` names the run on its page, its browser tab and the map footer. **Set it on every
@@ -125,11 +140,11 @@ If instead you want to *send* both runs to someone, build a file per run. `build
 has no `--outdir`, so point `--metrics` and `--out` into each directory yourself:
 
 ```bash
-python build_webapp.py --vpu 714 --aws-profile your-profile
+python build_webapp.py --vpu 714
 ```
 
 ```bash
-python build_webapp.py --vpu 714 --metrics outputs_v7/vpu714_metrics.parquet --out outputs_v7/vpu714_explorer.html --aws-profile your-profile
+python build_webapp.py --vpu 714 --metrics outputs_v7/vpu714_metrics.parquet --out outputs_v7/vpu714_explorer.html
 ```
 
 ## The files

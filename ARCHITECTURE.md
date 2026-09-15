@@ -89,13 +89,19 @@ s3://master-gauge-data/production/production-{ISO_A3}-{provider}-{YYYYMMDD}/meas
 <data-dir>/routing/gauge_data/{ISO_A3}_{provider}_{station}.csv
 ```
 
-The bucket is the default and needs no local input — it publishes its own catalog, one
-`catalog.csv` per provider, 37,529 rows concatenated. A local directory is used instead when
-`<data-dir>/routing/gauge_data/` exists, with metadata from
-`<data-dir>/master_catalog_with_metadata.xlsx` (37,528 rows). `--gauge-source` forces either.
-`<data-dir>` comes from `--data-dir` or `$GEOGLOWS_EVAL_DATA`. The source is resolved before
-any other work, so a wrong path or an unusable credential fails immediately rather than
-surfacing as zero gauges found.
+**A local directory is the default**, used whenever `<data-dir>/routing/gauge_data/` exists,
+with metadata from `<data-dir>/master_catalog_with_metadata.xlsx` (37,528 rows). `<data-dir>`
+comes from `--data-dir` or `$GEOGLOWS_EVAL_DATA`. It is preferred on three counts: ~15 ms a
+gauge against 20 ms threaded, no credentials, and it works offline.
+
+The bucket needs no local input at all — it publishes its own catalog, one `catalog.csv` per
+provider, 37,529 rows concatenated — but it is **private, and opt-in**. Reaching it requires
+`--gauge-source s3` or an `--aws-profile`; with neither, and no local directory, the run stops
+and says so rather than silently reaching for a bucket most readers of this repository cannot
+access. `--gauge-source` forces either backend.
+
+The source is resolved before any other work, so a wrong path or an unusable credential fails
+immediately rather than surfacing as zero gauges found.
 
 The two backends live behind one interface in `kge_map.py` — `catalog()`, `resolve()`,
 `locate()`, `open()` — and nothing downstream knows which is in use. The flattened

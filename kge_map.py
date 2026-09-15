@@ -49,9 +49,10 @@ USAGE
                   and, optionally, the catalog xlsx. Defaults to
                   $GEOGLOWS_EVAL_DATA. Only needed when reading gauges locally,
                   or to supply what the bucket catalog lacks (see below).
-    --gauge-source  local or s3. Default: local if <data-dir>/routing/gauge_data/
-                  exists, else s3. Resolved before anything else, so a wrong
-                  path or a missing credential fails immediately.
+    --gauge-source  local or s3. Default LOCAL, whenever
+                  <data-dir>/routing/gauge_data/ exists. S3 is opt-in: pass s3
+                  here or an --aws-profile. Resolved before anything else, so a
+                  wrong path or a missing credential fails immediately.
     --aws-profile Named AWS profile for the gauge bucket. Omit to use the
                   standard credential chain -- default profile, environment
                   variables, instance role -- which is what lets this run
@@ -64,20 +65,24 @@ USAGE
                   its browser tab. Default RUN_LABEL below.
 
 INPUTS REQUIRED
-  Gauge CSVs        Columns datetime,discharge. Read straight from the private
-                    bucket s3://master-gauge-data by default -- nothing to
-                    prepare beyond AWS credentials that reach it. Or from
-                    <data-dir>/routing/gauge_data/, named
-                    {ISO_A3}_{provider}_{station}.csv, if a local copy is there.
-                    A catalogued gauge with no CSV is skipped and reported in
-                    the run log.
-  Gauge catalog     Published in the bucket, one catalog.csv per provider, so
-                    nothing local is required. <data-dir>/master_catalog_with_
-                    metadata.xlsx is used IN ADDITION when present, for the two
-                    things the bucket lacks: Koppen group, and reach matches for
-                    840 gauges the bucket marks unmatched. Without it a run
-                    scores slightly fewer gauges and has no Koppen grouping.
-                    See KNOWN_ISSUES section S.
+  Gauge CSVs        Columns datetime,discharge. READ FROM A LOCAL DIRECTORY BY
+                    DEFAULT -- <data-dir>/routing/gauge_data/, named
+                    {ISO_A3}_{provider}_{station}.csv. That is the preferred
+                    source: faster, no credentials, works offline. A catalogued
+                    gauge with no CSV is skipped and reported in the run log.
+
+                    The same gauges are also published to the private bucket
+                    s3://master-gauge-data, which is OPT-IN: pass --gauge-source
+                    s3 or an --aws-profile. With neither, and no local
+                    directory, the run stops rather than reaching for a bucket
+                    most people cannot access.
+  Gauge catalog     <data-dir>/master_catalog_with_metadata.xlsx for a local
+                    run. An S3 run needs no local input -- the bucket publishes
+                    its own catalog, one catalog.csv per provider -- but that
+                    one carries no Koppen group, so an S3 run loses that
+                    grouping. The bucket is authoritative for reach matching
+                    either way; see KNOWN_ISSUES section S for why the xlsx's
+                    extra 840 matches are duplicates rather than a gap.
   Network table     Fetched from S3 at run time. The v2-model-table Supplies stream order and
                     drainage area.
   Model discharge   Normally the daily zarr, fetched from S3 at run time --
@@ -747,11 +752,21 @@ class S3GaugeSource:
 def gauge_source(data_dir: str | None, kind: str | None = None,
                  profile: str | None = None,
                  date_tag: str = GAUGE_DATE_TAG):
-    """Pick a gauge backend. Explicit choice first, then whatever is available.
+    """Pick a gauge backend. LOCAL IS THE DEFAULT; S3 is never reached by accident.
 
-    The rule is deliberately not "--data-dir means local": what selects local is
-    a gauge directory actually being there. An S3 run reads nothing local, so
-    --data-dir has no effect on one.
+    A local copy is preferred: it is faster (14.8 ms a gauge against 20.4 ms at
+    12 threads, and 148 ms serially), it needs no credentials, and it leaves the
+    private bucket out of the loop entirely -- which matters now that this
+    repository is public and most people reading it cannot reach that bucket.
+
+    So both ways to end up on S3 are deliberate: --gauge-source s3, or an
+    --aws-profile once local has been ruled out. With neither, and no local
+    directory, the run STOPS and says what to do rather than quietly reaching for
+    the network -- a silent fallback is how someone hits a private bucket without
+    meaning to.
+
+    What selects local is a gauge directory actually being there, not --data-dir
+    being passed: an S3 run reads nothing local, so the flag has no effect on one.
     """
     d = data_dir or DATA_DIR
     if kind == "local":
@@ -759,28 +774,38 @@ def gauge_source(data_dir: str | None, kind: str | None = None,
     if kind == "s3":
         return S3GaugeSource(profile=profile, date_tag=date_tag)
 
+    if os.path.isdir(os.path.join(d, "routing", "gauge_data")):
+        return LocalGaugeSource(d)
+
     # --aws-profile names a profile for THIS bucket and nothing else, so passing
-    # it is a statement of intent. Without this, pointing --data-dir at a
-    # directory that happens to hold gauge CSVs silently wins and the profile is
-    # ignored -- the run reads locally while the command line says otherwise.
+    # it is an explicit request for S3 -- but only once local has been ruled out,
+    # so a profile left in the environment cannot override a local copy.
     if profile:
         return S3GaugeSource(profile=profile, date_tag=date_tag)
 
-    if os.path.isdir(os.path.join(d, "routing", "gauge_data")):
-        return LocalGaugeSource(d)
-    return S3GaugeSource(profile=profile, date_tag=date_tag)
+    raise SystemExit(
+        "no local gauge data, and nothing asked for S3.\n"
+        f"  looked for: {os.path.join(d, 'routing', 'gauge_data')}\n"
+        "\n"
+        "  Preferred -- use a local copy:\n"
+        "    point --data-dir (or $GEOGLOWS_EVAL_DATA) at a directory holding\n"
+        "    routing/gauge_data/*.csv\n"
+        "\n"
+        "  Or read from the private bucket, which needs credentials that reach it:\n"
+        f"    --gauge-source s3   (bucket: {GAUGE_BUCKET})\n")
 
 
 def add_gauge_source_args(ap: argparse.ArgumentParser) -> None:
     """The gauge-source flags, identical across all three scripts."""
     ap.add_argument("--data-dir", default=DATA_DIR,
-                    help="directory holding master_catalog_with_metadata.xlsx "
-                         "and routing/gauge_data/. Defaults to "
-                         "$GEOGLOWS_EVAL_DATA. Used when gauges are read "
-                         "locally.")
+                    help="directory holding routing/gauge_data/ and, for local "
+                         "runs, master_catalog_with_metadata.xlsx. Defaults to "
+                         "$GEOGLOWS_EVAL_DATA. THE PREFERRED WAY to supply "
+                         "gauges.")
     ap.add_argument("--gauge-source", choices=("local", "s3"), default=None,
-                    help="where to read observed gauges from. Default: local if "
-                         "<data-dir>/routing/gauge_data/ exists, else s3.")
+                    help="where to read observed gauges from. Default: local, "
+                         "whenever <data-dir>/routing/gauge_data/ exists. S3 is "
+                         "opt-in -- pass s3 here, or an --aws-profile.")
     ap.add_argument("--aws-profile", default=None,
                     help="named AWS profile for the gauge bucket. Omit to use "
                          "the standard credential chain (default profile, "
