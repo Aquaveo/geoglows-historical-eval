@@ -105,8 +105,11 @@ page by the other. `provider_for()` reconstructs the provider from the xlsx's fr
 columns for the local path only; the bucket takes it from the prefix name, where it is
 authoritative rather than inferred.
 
-The bucket catalog is missing Köppen group and the reach matches for 840 gauges, mostly
-CARAVAN; the xlsx supplies both when present. See KNOWN_ISSUES section S.
+The bucket catalog carries no Köppen group, so an S3 run leaves that column empty and the
+page's Köppen grouping with it; a local run still gets it from the xlsx. The xlsx also
+matches 840 gauges the bucket marks `-1`, and those are **deliberately not used** — they are
+CARAVAN republications of stations the bucket already matches natively. See KNOWN_ISSUES
+section S.
 
 All sampled series are daily — 0 of 400 sampled files carry sub-daily rows — so no resampling
 happens. Files that do would be handled by keeping the **first** reading of each day, not by

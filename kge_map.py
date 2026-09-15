@@ -540,25 +540,21 @@ class S3GaugeSource:
     share, and every one of the 2,626 gauges the VPU 714 baseline scores is
     present.
 
-    Two things the bucket catalog does NOT have, both supplied by the xlsx when
-    one happens to be present (see `enrich_xlsx`) and simply absent otherwise:
+    The bucket is authoritative for reach matching, INCLUDING WHERE IT DECLINES
+    TO MATCH. master_catalog_with_metadata.xlsx carries 840 matches the bucket
+    marks -1, and taking them was tried and reverted: they are CARAVAN
+    republications of stations the bucket already matches under their native
+    provider. See KNOWN_ISSUES section S.
 
-      Koppen group      no equivalent column, so the web page loses that
-                        grouping on a bucket-only run
-      840 reach matches CARAVAN gauges carry final_river_id = -1 in the bucket
-                        where the xlsx has a real reach -- 839 CARAVAN and 2
-                        DGRE out of 25,294 globally matched gauges. VPU 714
-                        loses 6 of 2,632 that way, but a CARAVAN-heavy VPU
-                        would lose far more. See KNOWN_ISSUES section S.
+    Nothing local is read here at all. The only column the bucket lacks is
+    Koppen group, so an S3 run has `koppen` empty and the web page loses that
+    one grouping.
     """
 
     kind = "s3"
 
     def __init__(self, profile: str | None = None,
-                 date_tag: str = GAUGE_DATE_TAG,
-                 enrich_xlsx: str | None = None):
-        self.enrich_xlsx = enrich_xlsx if (
-            enrich_xlsx and os.path.exists(enrich_xlsx)) else None
+                 date_tag: str = GAUGE_DATE_TAG):
         try:
             import s3fs
         except ImportError:
@@ -575,10 +571,7 @@ class S3GaugeSource:
         self._prefixes = self._list_prefixes()
 
     def describe(self) -> str:
-        s = f"s3://{GAUGE_BUCKET} @ {self.date_tag}"
-        if self.enrich_xlsx:
-            s += f" (+{os.path.basename(self.enrich_xlsx)})"
-        return s
+        return f"s3://{GAUGE_BUCKET} @ {self.date_tag}"
 
     def _list_prefixes(self) -> dict[tuple[str, str], str]:
         """{(ISO_A3, provider): prefix} for this snapshot. Also the credential check.
@@ -684,43 +677,7 @@ class S3GaugeSource:
             n_stage = int((~has_q).sum())
             cat = cat[has_q]
             print(f"      {n_stage} stage-only gauges dropped from the catalog")
-        return self._enrich(cat)
-
-    def _enrich(self, cat: pd.DataFrame) -> pd.DataFrame:
-        """Fill in what the bucket catalog lacks, from a local xlsx if there is one.
-
-        Strictly additive, and skipped entirely when no xlsx is present -- the
-        bucket alone is the supported path. It exists because the xlsx carries
-        reach matches the bucket has not been given: 840 gauges, almost all
-        CARAVAN, are matched there and sentinel -1 here. Dropping them silently
-        would make a bucket run quietly score fewer gauges than a local one.
-
-        Koppen rides along for the same reason -- it is the other column the
-        bucket has no equivalent of.
-        """
-        if not self.enrich_xlsx:
-            return cat
-        x = pd.read_excel(self.enrich_xlsx)
-        key = lambda d: (d["ISO_A3"].astype(str).str.strip() + "_"      # noqa: E731
-                         + d["gauge_id"].map(_station_id))
-        x = x.assign(_k=key(x)).drop_duplicates("_k").set_index("_k")
-        cat = cat.assign(_k=key(cat))
-
-        cols = {}
-        if "Koppen Group (as of 2024)" in x.columns:
-            cols["koppen"] = cat["_k"].map(x["Koppen Group (as of 2024)"])
-        if "final_river_id" in x.columns:
-            # Only where the bucket has no match. The bucket wins wherever it
-            # has an opinion, so this can add gauges but never move one.
-            fallback = cat["_k"].map(x["final_river_id"])
-            unmatched = cat["final_river_id"].fillna(-1) <= 0
-            filled = cat["final_river_id"].where(~unmatched, fallback)
-            gained = int((unmatched & (filled.fillna(-1) > 0)).sum())
-            cols["final_river_id"] = filled
-            if gained:
-                print(f"      {gained} reach matches filled in from "
-                      f"{os.path.basename(self.enrich_xlsx)}")
-        return cat.assign(**cols).drop(columns="_k")
+        return cat
 
     def resolve(self, g: pd.DataFrame) -> pd.DataFrame:
         """Attach the S3 key for each gauge, dropping those with no object.
@@ -790,33 +747,26 @@ def gauge_source(data_dir: str | None, kind: str | None = None,
                  date_tag: str = GAUGE_DATE_TAG):
     """Pick a gauge backend. Explicit choice first, then whatever is available.
 
-    The rule is deliberately not "--data-dir means local": kge_map.py used to
-    need that directory for the catalog even when the CSVs came from elsewhere,
-    so tying the two together made the flag mean two things at once. What
-    selects local is a gauge directory actually being there.
+    The rule is deliberately not "--data-dir means local": what selects local is
+    a gauge directory actually being there. An S3 run reads nothing local, so
+    --data-dir has no effect on one.
     """
     d = data_dir or DATA_DIR
-    # Used only to top up what the bucket catalog lacks, and only if it is
-    # actually there -- an S3 run needs no local input.
-    xlsx = os.path.join(d, "master_catalog_with_metadata.xlsx")
-
     if kind == "local":
         return LocalGaugeSource(d)
     if kind == "s3":
-        return S3GaugeSource(profile=profile, date_tag=date_tag,
-                             enrich_xlsx=xlsx)
+        return S3GaugeSource(profile=profile, date_tag=date_tag)
 
     # --aws-profile names a profile for THIS bucket and nothing else, so passing
     # it is a statement of intent. Without this, pointing --data-dir at a
     # directory that happens to hold gauge CSVs silently wins and the profile is
     # ignored -- the run reads locally while the command line says otherwise.
     if profile:
-        return S3GaugeSource(profile=profile, date_tag=date_tag,
-                             enrich_xlsx=xlsx)
+        return S3GaugeSource(profile=profile, date_tag=date_tag)
 
     if os.path.isdir(os.path.join(d, "routing", "gauge_data")):
         return LocalGaugeSource(d)
-    return S3GaugeSource(profile=profile, date_tag=date_tag, enrich_xlsx=xlsx)
+    return S3GaugeSource(profile=profile, date_tag=date_tag)
 
 
 def add_gauge_source_args(ap: argparse.ArgumentParser) -> None:
@@ -845,17 +795,13 @@ def source_from_args(args):
 def note_unused_data_dir(args, source) -> None:
     """Say so when --data-dir was passed but cannot affect this run.
 
-    For serve.py and build_webapp.py ONLY. Under an S3 source the sole use of
-    --data-dir is the enrichment xlsx, and enrichment happens in catalog(),
-    which only build_gauge_table() calls -- so on those two scripts the flag is
-    inert while looking like it is doing something. kge_map.py must not call
-    this: there the same combination genuinely matters.
+    An S3 source reads nothing local, so --data-dir cannot affect the run while
+    still looking like it might. Called from every script, since this is now
+    true of all three.
     """
     if source.kind == "s3" and args.data_dir != DATA_DIR:
-        print(f"note: --data-dir {args.data_dir} is not used here -- this "
-              f"script reads gauges by name from the metrics parquet and never "
-              f"builds a catalog.\n      It matters for kge_map.py (Koppen and "
-              f"reach matches) and when --gauge-source local.")
+        print(f"note: --data-dir {args.data_dir} is not used when reading gauges "
+              f"from S3.\n      It applies to --gauge-source local.")
 
 
 def build_gauge_table(vpu: int, source) -> pd.DataFrame:
@@ -894,11 +840,9 @@ def build_gauge_table(vpu: int, source) -> pd.DataFrame:
     keep = [
         "final_river_id", "gauge_id", "fname", "loc", "latitude", "longitude",
         "ISO_A3", "river_name", "strmOrder", "USContArea",
-        # Two spellings on purpose: the xlsx's own column name, which the local
-        # backend passes through untouched, and the already-renamed one the S3
-        # backend produces when it fills Koppen in from an xlsx. Listing only
-        # the first silently dropped it from every enriched S3 run.
-        "Koppen Group (as of 2024)", "koppen",
+        # Local runs only -- the bucket catalog has no Koppen equivalent, so an
+        # S3 run carries no such column and compute_metrics() writes None.
+        "Koppen Group (as of 2024)",
     ]
     keep = [c for c in keep if c in g.columns]
     g = g[keep].rename(columns={"Koppen Group (as of 2024)": "koppen"})
@@ -1756,6 +1700,7 @@ def main() -> None:
     # Constructing the source is itself the check -- the local backend stats its
     # inputs, the S3 one lists the bucket.
     source = source_from_args(args)
+    note_unused_data_dir(args, source)
 
     if args.start is None or args.end is None:
         # Resolve the default window from whichever source is actually being

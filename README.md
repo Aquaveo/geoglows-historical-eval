@@ -15,8 +15,7 @@ Currently scoped to **VPU 714** (Missouri/Mississippi) as a demo.
 
 These are read straight from S3 by default; nothing is downloaded and nothing is cached.
 The bucket (`master-gauge-data`) is private, so you need AWS credentials with
-`s3:ListBucket` on it and `s3:GetObject` on `production/*`. Ask whoever administers the
-GEOGLOWS account.
+`s3:ListBucket` on it and `s3:GetObject` on `production/*`. 
 
 Credentials are picked up the usual way — a `[default]` profile, `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` in the environment, an attached instance role, or
@@ -28,22 +27,16 @@ aws s3 ls s3://master-gauge-data/production/ --profile your-profile
 ```
 
 If you already have the CSVs, point `--data-dir` (or `$GEOGLOWS_EVAL_DATA`) at the folder
-holding `routing/gauge_data/`. Local is used automatically when that folder is there, and
-it is faster. `--gauge-source local` or `--gauge-source s3` forces the choice either way.
+holding `routing/gauge_data/`. Local is used by default when that folder is there, and
+it is faster. Otherwise, aws will be used by default. `--gauge-source local` or `--gauge-source s3` forces the choice either way. The flag is optional
 
-**The gauge catalog is optional.** The bucket publishes its own catalog, so nothing local
-is required. But `master_catalog_with_metadata.xlsx` carries two things the bucket does
-not, and is used automatically for them if it is present under `--data-dir`:
+**Reading from S3 needs nothing local at all.** 
 
-- Köppen climate group, one of the groupings on the web page
-- reach matches for 840 gauges — almost all CARAVAN — that the bucket marks unmatched
-
-Runs without it work and simply score slightly fewer gauges, with no Köppen grouping.
-Which source ran is recorded in `vpu<VPU>_run.json`, along with the bucket snapshot date,
-so two sets of results are either comparable or provably not.
+Which source ran is recorded in `vpu<VPU>_run.json`, along with the bucket snapshot date, so
+two sets of results are either comparable or provably not.
 
 **The model** — nothing to prepare. The GEOGLOWS retrospective zarr is public HTTP with no
-credentials, or pass `--model-parquet` to score your own run.
+credentials, or pass `--model-parquet` to score your own run from a local source.
 
 ## Running it
 
