@@ -270,28 +270,54 @@ from scipy.stats import rankdata
 # Configuration
 # --------------------------------------------------------------------------- #
 
-# Where the observed-gauge inputs live. There is no useful default -- the gauge
-# CSVs are not part of this repository -- so set GEOGLOWS_EVAL_DATA, or pass
-# --data-dir to this script. "data" is a placeholder that makes the failure
-# legible rather than a path that happens to work on one machine.
+# Where the observed-gauge inputs live. None of this is guessed: the two things
+# a local run needs are named outright, by --gauge-dir and --catalog or their
+# environment variables. There is no useful default -- the gauge CSVs are not
+# part of this repository.
 #
-# The directory must contain:
-#     master_catalog_with_metadata.xlsx     the gauge catalog
-#     routing/gauge_data/*.csv              one CSV per gauge
+#     GEOGLOWS_EVAL_GAUGE_DIR   directory of {ISO}_{provider}_{station}.csv
+#     GEOGLOWS_EVAL_CATALOG     the gauge catalog, .xlsx or .csv
+#
+# GEOGLOWS_EVAL_DATA stays as a shorthand for the layout download_observed_data.py
+# happens to produce -- <dir>/routing/gauge_data/ beside
+# <dir>/master_catalog_with_metadata.xlsx -- but it is only a way of filling in
+# the two above, never an assumption imposed on anyone who lays their files out
+# differently. Anything given explicitly wins over it.
 DATA_DIR = os.environ.get("GEOGLOWS_EVAL_DATA", "data")
+GAUGE_DIR_ENV = os.environ.get("GEOGLOWS_EVAL_GAUGE_DIR")
+CATALOG_ENV = os.environ.get("GEOGLOWS_EVAL_CATALOG")
+
+# Only used to fill in what --data-dir implies, never to search for files.
+CONVENTION_GAUGES = os.path.join("routing", "gauge_data")
+CONVENTION_CATALOG = "master_catalog_with_metadata.xlsx"
+
+
+def local_paths(data_dir: str | None = None, gauge_dir: str | None = None,
+                catalog: str | None = None) -> tuple[str | None, str | None]:
+    """Work out where the gauge CSVs and the catalog are. Explicit wins.
+
+    Returns (gauge_dir, catalog), either of which may be None when nothing said
+    where it is -- deciding whether that is fatal belongs to the caller, because
+    an S3 run needs neither.
+    """
+    gd = gauge_dir or GAUGE_DIR_ENV
+    cat = catalog or CATALOG_ENV
+    if (gd is None or cat is None) and data_dir:
+        if gd is None:
+            gd = os.path.join(data_dir, CONVENTION_GAUGES)
+        if cat is None:
+            cat = os.path.join(data_dir, CONVENTION_CATALOG)
+    return gd, cat
 
 
 def data_paths(data_dir: str) -> tuple[str, str]:
-    """Resolve the catalog and gauge-CSV locations under `data_dir`.
+    """Back-compat shim: the conventional layout under `data_dir`, validated.
 
-    Fails immediately and by name if either is missing. Both are read much later
-    -- the catalog in build_gauge_table(), the CSVs one at a time during pairing
-    -- so without this a wrong --data-dir surfaces either as a pandas error on an
-    unrelated line or, worse, as every gauge being silently skipped for "no CSV
-    on disk", which reads as missing data rather than a wrong path.
+    Kept because it is the one path-resolving helper other scripts imported
+    before --gauge-dir and --catalog existed. New code should call local_paths().
     """
-    catalog = os.path.join(data_dir, "master_catalog_with_metadata.xlsx")
-    gauges = os.path.join(data_dir, "routing", "gauge_data")
+    catalog = os.path.join(data_dir, CONVENTION_CATALOG)
+    gauges = os.path.join(data_dir, CONVENTION_GAUGES)
     missing = [p for p in (catalog, gauges) if not os.path.exists(p)]
     if missing:
         raise SystemExit(
@@ -497,18 +523,44 @@ def _station_id(v) -> str:
 # touches -- about seven for VPU 714 -- rather than all 154.
 
 class LocalGaugeSource:
-    """Gauges from a directory produced by download_observed_data.py."""
+    """Gauges from a directory of CSVs, with a catalog file beside them.
+
+    Both are given, not inferred: `gauge_dir` is wherever the
+    {ISO}_{provider}_{station}.csv files actually are, and `catalog_path` is
+    whatever the catalog is actually called. Neither has to sit in the layout
+    download_observed_data.py produces -- that layout is only what --data-dir
+    expands to when someone uses the shorthand.
+    """
 
     kind = "local"
 
-    def __init__(self, data_dir: str):
-        self.data_dir = data_dir
-        self.catalog_path, self.gauge_dir = data_paths(data_dir)
+    def __init__(self, gauge_dir: str, catalog_path: str):
+        self.gauge_dir = gauge_dir
+        self.catalog_path = catalog_path
+        missing = [p for p in (gauge_dir, catalog_path) if not os.path.exists(p)]
+        if missing:
+            raise SystemExit(
+                "cannot find the local gauge inputs:\n"
+                + "".join(f"  missing: {p}\n" for p in missing)
+                + "  --gauge-dir is the directory of per-gauge CSVs;\n"
+                "  --catalog is the catalog file itself, .xlsx or .csv.\n"
+                "  Checked here rather than at read time: otherwise a wrong path\n"
+                "  surfaces as every gauge being skipped, which reads as missing\n"
+                "  data rather than a wrong path.")
 
     def describe(self) -> str:
-        return f"local:{os.path.abspath(self.data_dir)}"
+        return f"local:{os.path.abspath(self.gauge_dir)}"
 
     def catalog(self) -> pd.DataFrame:
+        """The catalog, read by extension rather than assumed to be Excel.
+
+        .csv is accepted because the bucket publishes its catalogs that way, so
+        a copy pulled down from there works as a local catalog with no
+        conversion. Anything else is tried as Excel, which covers .xls and the
+        occasional extensionless file.
+        """
+        if self.catalog_path.lower().endswith(".csv"):
+            return pd.read_csv(self.catalog_path)
         return pd.read_excel(self.catalog_path)
 
     def resolve(self, g: pd.DataFrame) -> pd.DataFrame:
@@ -751,7 +803,9 @@ class S3GaugeSource:
 
 def gauge_source(data_dir: str | None, kind: str | None = None,
                  profile: str | None = None,
-                 date_tag: str = GAUGE_DATE_TAG):
+                 date_tag: str = GAUGE_DATE_TAG,
+                 gauge_dir: str | None = None,
+                 catalog: str | None = None):
     """Pick a gauge backend. LOCAL IS THE DEFAULT; S3 is never reached by accident.
 
     A local copy is preferred: it is faster (14.8 ms a gauge against 20.4 ms at
@@ -765,17 +819,22 @@ def gauge_source(data_dir: str | None, kind: str | None = None,
     the network -- a silent fallback is how someone hits a private bucket without
     meaning to.
 
-    What selects local is a gauge directory actually being there, not --data-dir
-    being passed: an S3 run reads nothing local, so the flag has no effect on one.
+    Nothing is guessed. The gauge directory and the catalog are whatever
+    --gauge-dir and --catalog say they are; --data-dir only fills those two in
+    when they were not given, using the layout download_observed_data.py happens
+    to produce. An S3 run reads none of them.
     """
-    d = data_dir or DATA_DIR
+    d = data_dir if data_dir not in (None, DATA_DIR) else (
+        data_dir if "GEOGLOWS_EVAL_DATA" in os.environ else None)
+    gd, cat = local_paths(d or DATA_DIR, gauge_dir, catalog)
+
     if kind == "local":
-        return LocalGaugeSource(d)
+        return LocalGaugeSource(gd, cat)
     if kind == "s3":
         return S3GaugeSource(profile=profile, date_tag=date_tag)
 
-    if os.path.isdir(os.path.join(d, "routing", "gauge_data")):
-        return LocalGaugeSource(d)
+    if gd and os.path.isdir(gd):
+        return LocalGaugeSource(gd, cat)
 
     # --aws-profile names a profile for THIS bucket and nothing else, so passing
     # it is an explicit request for S3 -- but only once local has been ruled out,
@@ -783,31 +842,34 @@ def gauge_source(data_dir: str | None, kind: str | None = None,
     if profile:
         return S3GaugeSource(profile=profile, date_tag=date_tag)
 
-    # Two different mistakes, and saying which one it was is most of the value:
-    # a path was given and is wrong, or no path was given at all and "data" is
-    # the placeholder default resolving against the current directory. The
-    # second is the common one and reads as nonsense without this.
-    looked = os.path.abspath(os.path.join(d, "routing", "gauge_data"))
-    # NOT `data_dir is None`: argparse defaults --data-dir to DATA_DIR, so an
-    # unset flag arrives as the placeholder string rather than None. Unconfigured
-    # means the env var is absent AND nothing overrode the placeholder.
-    if ("GEOGLOWS_EVAL_DATA" not in os.environ
-            and (data_dir is None or data_dir == DATA_DIR)):
-        why = ("  No gauge directory has been configured: neither --data-dir nor\n"
-               f"  $GEOGLOWS_EVAL_DATA is set, so this fell back to ./{DATA_DIR}/ and\n"
-               f"  looked in\n    {looked}\n")
-    else:
-        why = f"  looked in\n    {looked}\n"
+    # Saying WHICH mistake it was is most of the value: a path was given and is
+    # wrong, or nothing was configured at all and "data" is the placeholder
+    # resolving against the current directory. The second reads as nonsense
+    # without this, and is the common one.
+    configured = any([gauge_dir, catalog, GAUGE_DIR_ENV, CATALOG_ENV,
+                      "GEOGLOWS_EVAL_DATA" in os.environ,
+                      data_dir not in (None, DATA_DIR)])
+    looked = f"  looked in\n    {os.path.abspath(gd)}\n" if gd else ""
+    why = looked if configured else (
+        "  Nothing has been configured: none of --gauge-dir, --catalog or\n"
+        f"  --data-dir was given and no GEOGLOWS_EVAL_* variable is set, so this\n"
+        f"  fell back to ./{DATA_DIR}/ and\n"
+        f"  looked in\n    {os.path.abspath(gd)}\n")
 
     raise SystemExit(
         "no local gauge data, and nothing asked for S3.\n"
         + why
         + "\n"
-        "  Preferred -- point it at a local copy, once, for every future shell:\n"
-        "    echo 'export GEOGLOWS_EVAL_DATA=/path/to/gauge/data' >> ~/.bashrc\n"
+        "  Preferred -- name the two local inputs, once, for every future shell:\n"
+        "    echo 'export GEOGLOWS_EVAL_GAUGE_DIR=/path/to/gauge/csvs' >> ~/.bashrc\n"
+        "    echo 'export GEOGLOWS_EVAL_CATALOG=/path/to/catalog.xlsx'  >> ~/.bashrc\n"
         "    source ~/.bashrc\n"
-        "  or pass --data-dir /path/to/gauge/data for this run only. Either way the\n"
-        "  directory must hold routing/gauge_data/*.csv\n"
+        "  or pass --gauge-dir and --catalog for this run only. The catalog may be\n"
+        "  .xlsx or .csv, and neither path has to sit in any particular layout.\n"
+        "\n"
+        "  Shorthand, if your files are laid out the way download_observed_data.py\n"
+        f"  writes them -- <dir>/{CONVENTION_GAUGES}/ beside <dir>/{CONVENTION_CATALOG}:\n"
+        "    --data-dir <dir>   (or $GEOGLOWS_EVAL_DATA)\n"
         "\n"
         "  Or read from the private bucket, which needs credentials that reach it:\n"
         f"    --gauge-source s3   (bucket: {GAUGE_BUCKET})\n")
@@ -815,11 +877,21 @@ def gauge_source(data_dir: str | None, kind: str | None = None,
 
 def add_gauge_source_args(ap: argparse.ArgumentParser) -> None:
     """The gauge-source flags, identical across all three scripts."""
-    ap.add_argument("--data-dir", default=DATA_DIR,
-                    help="directory holding routing/gauge_data/ and, for local "
-                         "runs, master_catalog_with_metadata.xlsx. Defaults to "
-                         "$GEOGLOWS_EVAL_DATA. THE PREFERRED WAY to supply "
+    ap.add_argument("--gauge-dir", default=None,
+                    help="directory holding the per-gauge CSVs, named "
+                         "{ISO_A3}_{provider}_{station}.csv. Defaults to "
+                         "$GEOGLOWS_EVAL_GAUGE_DIR. THE PREFERRED WAY to supply "
                          "gauges.")
+    ap.add_argument("--catalog", default=None,
+                    help="the gauge catalog file, .xlsx or .csv, carrying "
+                         "final_river_id, gauge_id, ISO_A3, latitude, longitude. "
+                         "Defaults to $GEOGLOWS_EVAL_CATALOG.")
+    ap.add_argument("--data-dir", default=DATA_DIR,
+                    help="shorthand for both of the above, if your files sit in "
+                         f"the layout <dir>/{CONVENTION_GAUGES}/ beside "
+                         f"<dir>/{CONVENTION_CATALOG}. Defaults to "
+                         "$GEOGLOWS_EVAL_DATA. Ignored for whichever of "
+                         "--gauge-dir / --catalog you give explicitly.")
     ap.add_argument("--gauge-source", choices=("local", "s3"), default=None,
                     help="where to read observed gauges from. Default: local, "
                          "whenever <data-dir>/routing/gauge_data/ exists. S3 is "
@@ -833,8 +905,8 @@ def add_gauge_source_args(ap: argparse.ArgumentParser) -> None:
 
 
 def source_from_args(args):
-    return gauge_source(args.data_dir, args.gauge_source,
-                        args.aws_profile, args.gauge_date_tag)
+    return gauge_source(args.data_dir, args.gauge_source, args.aws_profile,
+                        args.gauge_date_tag, args.gauge_dir, args.catalog)
 
 
 def note_unused_data_dir(args, source) -> None:
@@ -844,9 +916,16 @@ def note_unused_data_dir(args, source) -> None:
     still looking like it might. Called from every script, since this is now
     true of all three.
     """
-    if source.kind == "s3" and args.data_dir != DATA_DIR:
-        print(f"note: --data-dir {args.data_dir} is not used when reading gauges "
-              f"from S3.\n      It applies to --gauge-source local.")
+    if source.kind != "s3":
+        return
+    given = [f"--{n.replace('_','-')}" for n, v in
+             (("gauge_dir", args.gauge_dir), ("catalog", args.catalog),
+              ("data_dir", args.data_dir if args.data_dir != DATA_DIR else None))
+             if v]
+    if given:
+        print(f"note: {', '.join(given)} {'is' if len(given)==1 else 'are'} not "
+              f"used when reading gauges from S3.\n"
+              f"      They apply to --gauge-source local.")
 
 
 def build_gauge_table(vpu: int, source) -> pd.DataFrame:

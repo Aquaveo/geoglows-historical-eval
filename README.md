@@ -14,21 +14,29 @@ Currently scoped to **VPU 714** (Missouri/Mississippi) as a demo.
 **Gauge observations** — one CSV per gauge, columns `datetime,discharge`, named
 `{ISO_A3}_{provider}_{station}.csv`.
 
-**Use a local copy. This is the recommended way and the default.** Put the CSVs under
-`routing/gauge_data/` and point `--data-dir` at the directory above it, or set
-`$GEOGLOWS_EVAL_DATA` once:
+**Use a local copy. This is the recommended way and the default.** You name two things — where
+the CSVs are, and which file is the catalog. Neither is guessed, and neither has to sit in any
+particular layout:
 
 ```bash
-echo 'export GEOGLOWS_EVAL_DATA=/path/to/your/gauge/data' >> ~/.bashrc && source ~/.bashrc
+echo 'export GEOGLOWS_EVAL_GAUGE_DIR=/path/to/gauge/csvs' >> ~/.bashrc
+echo 'export GEOGLOWS_EVAL_CATALOG=/path/to/your_catalog.xlsx' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-Local is faster — about 15 ms a gauge against 20 ms threaded and 148 ms unthreaded — needs no
-credentials, and works offline. Nothing else has to be configured: if
-`<data-dir>/routing/gauge_data/` exists, that is what gets read.
+Or per run: `--gauge-dir /path/to/gauge/csvs --catalog /path/to/your_catalog.xlsx`.
 
-You also need `master_catalog_with_metadata.xlsx` in the same directory for a local run. It
-supplies `final_river_id`, `gauge_id`, `ISO_A3`, `latitude`, `longitude`, and the Köppen group
-the page groups by.
+The **catalog** may be `.xlsx` or `.csv`, and can be called anything. It needs the columns
+`final_river_id`, `gauge_id`, `ISO_A3`, `latitude`, `longitude`; `Koppen Group (as of 2024)`
+is optional and adds a grouping to the page.
+
+Local is faster — about 15 ms a gauge against 20 ms threaded and 148 ms unthreaded — needs no
+credentials, and works offline.
+
+*Shorthand:* if your files already sit the way `download_observed_data.py` writes them —
+`<dir>/routing/gauge_data/` beside `<dir>/master_catalog_with_metadata.xlsx` — then
+`--data-dir <dir>` (or `$GEOGLOWS_EVAL_DATA`) fills in both. Anything you name explicitly wins
+over it.
 
 ### Reading from S3 instead
 
