@@ -66,6 +66,26 @@ CONTINGENCY_FIELDS = ('n_years_ams', 't2_obs', 't2_sim', 'hits', 'false_alarms',
 # Metrics that kge_map.py also computes per calendar month.
 MONTHLY_PREFIXES = ['n', 'mean_obs', 'mean_sim', 'sd_obs', 'sd_sim', 'r', 'spearman', 'alpha', 'beta', 'gamma', 'pbias_pct', 'kge_2012', 'nse', 'rmse', 'mae', 'nrmse', 'mae_rel', 'n_clim', 'ss_clim', 'ss_clim_mae']
 
+# Decision mode, written by `kge_map.py --mode decision` to a separate parquet.
+# Merged onto the metric rows by reach id when that file is present, so the page
+# offers decisions and statistics in one picker. A gauge scored in the metric
+# table but absent from the decision table keeps null here and draws as no
+# value -- which is the honest rendering: not "no skill", but not enough record
+# to place the category breakpoints at all.
+# hs_verdict is the traffic light itself; the rest are what it was computed
+# from, kept so a gauge's panel can say WHY it is the colour it is. The page
+# colours by hs_verdict alone -- decision mode offers no metric choice.
+DECISION_FIELDS = ('hs_verdict', 'hs_xdry_pod', 'hs_xdry_n_events',
+                   'hs_xdry_p_luck', 'hs_xdry_hits', 'hs_xdry_misses',
+                   'hs_n_months', 'hs_min_n_month',
+                   'tr_verdict', 'tr_obs', 'tr_sim', 'tr_n_years',
+                   'wd_verdict')
+
+# Every verdict column, each filled with its own grey code for gauges the
+# decision run could not score. A gauge may answer one decision and not the
+# other, so they are filled independently.
+VERDICT_COLS = ('hs_verdict', 'tr_verdict')
+
 STATE: dict = {}
 
 
@@ -106,8 +126,76 @@ def load_run_config(vpu: int, metrics_path: str) -> dict:
             "date_start": first, "date_end": last}
 
 
+def decisions_beside(metrics_path: str, vpu: int) -> str | None:
+    """Path to the decision parquet next to the metric one, if it was written."""
+    p = os.path.join(os.path.dirname(metrics_path) or ".",
+                     f"vpu{vpu}_decisions.parquet")
+    return p if os.path.exists(p) else None
+
+
+def merge_decisions(m: pd.DataFrame, path: str, cfg: dict) -> pd.DataFrame:
+    """Join the decision columns onto the metric rows by reach id.
+
+    Refuses to merge two runs scored over different windows. The page reports
+    ONE window in its header and on every chart; silently combining a decision
+    run over 1980-2020 with a metric run over the full record would label the
+    decision columns with a period they were not computed on.
+    """
+    d = pd.read_parquet(path)
+    dcfg_path = os.path.join(os.path.dirname(path) or ".",
+                             os.path.basename(path).replace(".parquet",
+                                                            "_run.json"))
+    if os.path.exists(dcfg_path):
+        with open(dcfg_path, encoding="utf-8") as fh:
+            dcfg = json.load(fh)
+        same = (dcfg.get("date_start") == cfg.get("date_start")
+                and dcfg.get("date_end") == cfg.get("date_end"))
+        if not same:
+            # Carried into the payload as well as printed. Refusing the merge
+            # silently looks identical to "this feature was never built" from
+            # the browser, and the server log is not where anyone is looking.
+            STATE["decision_note"] = (
+                f"Decision scores were not loaded: they cover "
+                f"{dcfg.get('date_start')}..{dcfg.get('date_end')} but the "
+                f"metrics cover {cfg.get('date_start')}..{cfg.get('date_end')}. "
+                f"Re-run both over the same window.")
+            print("\n  " + "!" * 68)
+            print(f"  {STATE['decision_note']}")
+            print(f"  python kge_map.py --vpu {cfg.get('vpu')} --mode decision "
+                  f"--start {cfg.get('date_start')} --end {cfg.get('date_end')}")
+            print("  " + "!" * 68 + "\n")
+            return m
+    keep = ["final_river_id"] + [c for c in DECISION_FIELDS if c in d.columns]
+    merged = m.merge(d[keep], on="final_river_id", how="left")
+    # A gauge in the metric table but absent from the decision table could not
+    # be scored at all. It becomes grey rather than null, so it still draws --
+    # "we could not judge this" is a result, and on VPU 122 it is 96% of them.
+    from kge_map import VERDICT_GREY, TREND_GREY
+    greys = {"hs_verdict": VERDICT_GREY, "tr_verdict": TREND_GREY}
+    counts = []
+    for col in VERDICT_COLS:
+        if col not in merged:
+            continue
+        n = int(merged[col].notna().sum())
+        merged[col] = merged[col].fillna(greys[col]).astype(int)
+        counts.append(f"{col.split('_')[0]} {n}")
+    # Derived here, not in the parquet: it is banded straight off the `spearman`
+    # column the metric table already carries, so the bands can be retuned
+    # without re-running kge_map.py.
+    if "spearman" in merged:
+        from kge_map import wetdry_verdict
+        merged["wd_verdict"] = merged["spearman"].map(wetdry_verdict).astype(int)
+        counts.append(f"wd {int((merged['wd_verdict'] >= 0).sum())}")
+    print(f"  decisions: {', '.join(counts)} scored of {len(merged)} gauges "
+          f"({os.path.basename(path)})")
+    return merged
+
+
 def load_gauges(vpu: int, metrics_path: str) -> dict:
     m = pd.read_parquet(metrics_path)
+    dpath = decisions_beside(metrics_path, vpu)
+    if dpath:
+        m = merge_decisions(m, dpath, STATE["cfg"])
     _bb = framing_bbox(m.longitude, m.latitude)
     rows = []
     for r in m.itertuples(index=False):
@@ -127,7 +215,7 @@ def load_gauges(vpu: int, metrics_path: str) -> dict:
                   "rmse", "mae", "nrmse", "mae_rel", "ss_clim", "ss_clim_mae",
                   "spearman",
                   "mean_obs", "mean_sim", "sd_obs", "sd_sim", "n_pairs",
-                  "n_clim") + CONTINGENCY_FIELDS
+                  "n_clim") + CONTINGENCY_FIELDS + DECISION_FIELDS
         # Monthly metrics ship as one 12-element array per metric rather than
         # 240 separate keys. The key names were 70% of that block's bytes, so
         # this removes ~7 MB from the static build without dropping a single
@@ -143,6 +231,9 @@ def load_gauges(vpu: int, metrics_path: str) -> dict:
             "nOutside": _bb[4],
             "vpu": vpu, "noSkill": KGE_NO_SKILL,
             "label": STATE["cfg"]["label"],
+            # Why decision mode is absent, when a decision parquet exists but
+            # could not be used. None when there is nothing to explain.
+            "dNote": STATE.get("decision_note"),
             "window": [STATE["cfg"]["date_start"], STATE["cfg"]["date_end"]]}
 
 
