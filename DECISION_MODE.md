@@ -1,13 +1,24 @@
 # Decision mode: what RFS could be informing from the retrospective
 
-Brainstorm, not decided. Written 2026-09-17. This is the candidate list of real decisions an
-RFS user makes using retrospective data, so that a second evaluation mode can score the model
-on *whether it informs the decision correctly* rather than on how closely its hydrograph
-matches a gauge.
+Started 2026-09-17 as a brainstorm; **four decisions are now built and running**. The mode scores
+the model on *whether it informs a decision correctly* rather than on how closely its hydrograph
+matches a gauge. Run with `kge_map.py --mode decision` (or `both`, the default), then `serve.py`.
 
-Most of this is not committed. The reference ("what counts as chance") is deliberately left open
-per decision — see [Open questions](#open-questions). Decision 1 is being built first; its
-settled choices are in [Decision log](#decision-log).
+### What is built
+
+| Question | Compared | Metric | Worst band |
+|---|---|---|---|
+| Does the model identify **severe low flow**? | HydroSOS category 1, each series binned on its own record | catch rate on severe months | per-gauge binomial luck test |
+| Does the model **show a flood when the river floods**? | floods above each series' own 2-year level, ±3 day match | CSI | per-gauge binomial luck test |
+| Does the model see **how the river is changing**? | Mann-Kendall trend sign, annual mean, same window | trend direction agreement | fails significance |
+| Does the model tell **wet days from dry days**? | daily model vs daily gauge flow | Spearman rank correlation | chosen threshold |
+
+Deliberately **not** built: whether flood *magnitudes* are right. Measured, and it cannot be
+resolved per gauge — see [the magnitude question](#decision-2--the-magnitude-question-still-pinned).
+
+Every provisional number is recorded below with what it costs. The decisions differ sharply in
+how much their verdicts rest on evidence rather than choice, and that is the first thing to check
+before quoting any of them.
 
 ## Decision log
 
@@ -29,6 +40,24 @@ Recorded so they can be revisited. Each entry says who chose it and what changes
 | 2026-09-18 | Scored on the **extremely-dry band only** (category 1, driest 10%) | user | — |
 | 2026-09-18 | **Red = luck cannot be ruled out**, per gauge, exact binomial, one-sided p ≤ 0.05 | user | the only threshold here that is derived rather than chosen |
 | 2026-09-18 | **Green ≥ 0.50** catch, **Good 0.33–0.50**, **Weak** below | user | `VERDICT_GREEN` / `VERDICT_GOOD` in `kge_map.py` |
+| 2026-09-21 | `--mode` defaults to **both**; one run writes metrics and verdicts over one window | user | removes the window-drift class of bug entirely |
+| 2026-09-21 | Add **wet and dry days**, banded off the existing daily `spearman` | user | bands anchored to nothing; see that section |
+| 2026-09-21 | Seasonality is **allowed** to drive the wet/dry score | user | a calendar-only model scores 0.506 of the 0.569 median |
+| 2026-09-21 | Flood question scored with **CSI**, not the hit rate | user | protects against a model that floods more to score better |
+| 2026-09-21 | Flood **2-year level only**; bands do not transfer to other return periods | user | CSI is prevalence-dependent |
+| 2026-09-21 | Flood **poor = per-gauge luck test**, **strong = CSI 0.50** | user | two of four decisions now have a derived worst band |
+
+### Where each decision's worst band comes from
+
+The thing worth checking when revisiting any of these: whether the bottom band means something
+or was chosen.
+
+| Decision | Worst band | Derived? |
+|---|---|---|
+| severe low flow | luck cannot be ruled out, per gauge | **yes** — chance is 10% by construction |
+| floods | luck cannot be ruled out, per gauge | **yes** — chance is the model's own flood rate |
+| wetter or drier | trend fails significance | partly — inherits the p < 0.05 cliff |
+| wet and dry days | Spearman < 0.30 | **no** — pure judgment, and the calendar-only benchmark that would fix it is measured and unused |
 
 ### Built 2026-09-18 — results on VPU 714
 
@@ -210,10 +239,68 @@ window letting luck in.
 
 At T=10 same-day matching gives the median gauge **literally zero hits**; ±3 days gives 0.125.
 
-Undecided: the declustering separation (7 days is mine, not agreed), which return periods to
-show, and where the verdict boundaries go.
+### Built 2026-09-21 — "Does the model show a flood when the river floods?"
 
-## Decision 2 — the earlier analysis that pinned it
+Wording matters here. The question is **occurrence and timing, not magnitude**: both series are
+thresholded at their own 2-year level, so the model flags about as many floods as the gauge does
+(ratio 0.94 median) and size divides out by construction. The magnitude question stays pinned —
+see below. An earlier draft called this "flood timing", which describes the mechanics rather
+than the question; the user corrected it back toward their original wording.
+
+**Settled spec** — constants in `kge_map.py`:
+
+| | value | why |
+|---|---|---|
+| `FLOOD_RP` | 2 | CSI halves at 5yr and again by 10yr; only 2yr has room to discriminate |
+| `FLOOD_WINDOW` | 3 | ±3 days; more than doubles measurable skill over same-day |
+| `FLOOD_SEP` | 7 | declustering; **must be ≥ 2×window+1** |
+| `FLOOD_ALPHA` | 0.05 | one-sided per-gauge binomial |
+| `FLOOD_STRONG` | 0.50 | hits = misses + false alarms |
+| `FLOOD_MIDDLE` | 0.19 | descriptive, anchored to nothing |
+
+**`FLOOD_SEP ≥ 2×FLOOD_WINDOW+1 is not optional.** Below it, neighbouring observed floods have
+overlapping match windows and one modelled flood is credited to two of them. At 7 and 3 the
+windows exactly touch. A ±5 day hit rate of 0.307 quoted during design was inflated for exactly
+this reason and should be disregarded.
+
+**CSI, not the hit rate.** The hit rate rises if the model simply floods more often; CSI cannot,
+because false alarms sit in its denominator. They rank gauges at 0.96 correlation on VPU 714 —
+but at the 1.4% of gauges that over-flood, the hit rate says 0.24 where CSI says 0.11. The
+protection matters for scoring a routed variant, where over-flooding would otherwise be
+invisible.
+
+**There is no published CSI skill classification.** Searched: the WMO/BoM verification reference,
+EUMETrain and the MET manual all define CSI and none band it. The one real landmark is
+arithmetic — CSI 0.50 is where hits equal misses plus false alarms. (In its original use that is
+the *deterministic limit* on forecast lead time; the algebra transfers, the framing does not, so
+it is not a citable quality band.) Underlying reference: Schaefer 1990, *Weather and Forecasting*
+5(4).
+
+**CSI depends on prevalence**, so these bands are valid at the 2-year level ONLY and cannot be
+reused at other return periods even if the model performed identically.
+
+**Measured on five VPUs before choosing anything** — POD 0.24–0.38, chance 0.02–0.04, beaten at
+96–100% of gauges, 41–71% of the between-gauge spread real rather than noise. VPU 714 is the
+weakest of the five, so nothing is tuned to flatter it.
+
+**Results, VPU 714, full run:**
+
+| verdict | gauges | |
+|---|---|---|
+| Strong — hits ≥ misses + false alarms | 6 | 0.2% |
+| Good — above the median gauge | 864 | 33.3% |
+| Weak — beats luck, below median | 1,535 | 59.2% |
+| Poor — cannot be shown to beat luck | 183 | 7.1% |
+| Can't say — fewer than 5 floods | 3 | 0.1% |
+
+Two corrections to figures quoted during design. A sample of 747 gauges found **no** gauge at
+CSI 0.50; the full run finds **6**, so the top band is not empty. And switching from
+paired-day to whole-record thresholds (for consistency with `contingency_stats` and
+KNOWN_ISSUES P) moved median CSI from 0.191 to **0.155** — so `FLOOD_MIDDLE = 0.19` now sits near
+the 67th percentile rather than the median, which is why Good/Weak splits 33/59 rather than
+evenly. Re-centring to 0.155 is a one-line change if "Good" should mean the top half.
+
+## Decision 2 — the magnitude question, still pinned
 
 Settled design: classify each **year's annual maximum** into a return-period band, each series
 against thresholds fitted from its **own** record (Gumbel MoM, as RFS does), so volume bias
@@ -322,6 +409,19 @@ this affects both series, but it has not been checked with prewhitening.
   KNOWN_ISSUES 1 and 2 for the known matching problems on this VPU.
 - **Where this file belongs.** It is a new file; the project convention is that undecided things
   live in `KNOWN_ISSUES.md`. Folding it in has not been decided.
+- **The wet/dry bands are the weakest thing here.** Every cut is judgment, and the per-gauge
+  calendar-only benchmark that would anchor the bottom one is measured and sitting unused. If
+  any single number in this file gets revisited, it should be that one.
+- **Prewhitening for the trend test.** Plain Mann-Kendall over-rejects on autocorrelated series,
+  so both series likely find more trends than are real, inflating both "misses it" and "invents
+  one". Not implemented, and it would change the trend map.
+- **The 30-year trend floor is too permissive.** Detecting the typical 4%/decade signal takes
+  ~90 years; no gauge has 100. Roughly half the coloured gauges on the trend map have less
+  record than it takes to see even a strong 10%/decade trend, so some unknown share of
+  "neither finds a trend" is really "could not have seen one".
+- **Whether decisions 2 and 3 need a pooled layer.** Both are underpowered per gauge but solid
+  pooled — flood magnitude is kappa 0.178 over 165,000 gauge-years. A VPU-level statement would
+  say something true in data-poor regions where the map goes grey. Not built.
 
 ### Consequences of the overlap choice
 
