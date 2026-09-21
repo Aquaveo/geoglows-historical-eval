@@ -79,12 +79,14 @@ DECISION_FIELDS = ('hs_verdict', 'hs_xdry_pod', 'hs_xdry_n_events',
                    'hs_xdry_p_luck', 'hs_xdry_hits', 'hs_xdry_misses',
                    'hs_n_months', 'hs_min_n_month',
                    'tr_verdict', 'tr_obs', 'tr_sim', 'tr_n_years',
+                   'fl_verdict', 'fl_csi', 'fl_n_obs', 'fl_n_sim', 'fl_hits',
+                   'fl_false', 'fl_p_luck',
                    'wd_verdict')
 
 # Every verdict column, each filled with its own grey code for gauges the
 # decision run could not score. A gauge may answer one decision and not the
 # other, so they are filled independently.
-VERDICT_COLS = ('hs_verdict', 'tr_verdict')
+VERDICT_COLS = ('hs_verdict', 'tr_verdict', 'fl_verdict')
 
 STATE: dict = {}
 
@@ -170,8 +172,9 @@ def merge_decisions(m: pd.DataFrame, path: str, cfg: dict) -> pd.DataFrame:
     # A gauge in the metric table but absent from the decision table could not
     # be scored at all. It becomes grey rather than null, so it still draws --
     # "we could not judge this" is a result, and on VPU 122 it is 96% of them.
-    from kge_map import VERDICT_GREY, TREND_GREY
-    greys = {"hs_verdict": VERDICT_GREY, "tr_verdict": TREND_GREY}
+    from kge_map import VERDICT_GREY, TREND_GREY, FLOOD_GREY
+    greys = {"hs_verdict": VERDICT_GREY, "tr_verdict": TREND_GREY,
+             "fl_verdict": FLOOD_GREY}
     counts = []
     for col in VERDICT_COLS:
         if col not in merged:

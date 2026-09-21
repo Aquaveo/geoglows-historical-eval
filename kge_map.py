@@ -1754,6 +1754,129 @@ def _kappa(cs: np.ndarray, co: np.ndarray, linear: bool) -> float | None:
     return (p_o - p_e) / (1.0 - p_e)
 
 
+# --- Decision: does the model show a flood when the river floods? ----------- #
+# Each series is thresholded at ITS OWN 2-year level, so flood MAGNITUDE divides
+# out -- this establishes whether a flood shows up and when, not whether it was
+# the right size. The magnitude question was measured and abandoned: proving the
+# model's flood levels per gauge needs ~145 years of record and none has 100.
+#
+# Scored on declustered EVENTS, not days: a flood spans ~2.9 days, so daily
+# counts would triple the sample and break independence.
+#
+# FLOOD_SEP must be at least 2*FLOOD_WINDOW+1, or two neighbouring observed
+# floods have overlapping match windows and one modelled flood can be credited
+# to both. At 7 and 3 the windows exactly touch.
+FLOOD_RP = 2                  # return period; CSI falls by half at 5yr and again by 10yr
+FLOOD_WINDOW = 3              # a match counts within +/- this many days
+FLOOD_SEP = 7                 # days two exceedances must be apart to be separate floods
+FLOOD_ALPHA = 0.05            # one-sided; above this p-value the gauge is red
+# 0.50 is the point where hits equal misses plus false alarms -- the forecast
+# gets as much right as it gets wrong. It is arithmetic, not a published band:
+# CSI has no standard skill classification, which was searched for and does not
+# exist. Measured on 747 gauges across 5 VPUs, NO gauge reaches it. The empty
+# band is deliberate -- it is a fixed reference that will not drift when a
+# different model run is scored, unlike a cut taken from this run's spread.
+FLOOD_STRONG = 0.50
+FLOOD_MIDDLE = 0.19           # pooled median over those 747 gauges; descriptive only
+
+FLOOD_GREY, FLOOD_POOR, FLOOD_WEAK, FLOOD_GOOD, FLOOD_STRONG_N = -1, 0, 1, 2, 3
+FLOOD_LABELS = {-1: "not enough floods to judge",
+                0: "cannot be shown to beat luck",
+                1: "beats luck, below the median gauge",
+                2: "above the median gauge",
+                3: "as many hits as misses and false alarms combined"}
+
+
+def return_level(series: pd.Series, T: float) -> float:
+    """T-year level from a Gumbel MoM fit to calendar-year maxima.
+
+    Same fit contingency_stats() uses, called through geoglows.analyze.gumbel1
+    so it cannot drift from RFS. Annual maxima come from the series' WHOLE
+    record in the window, not the paired days -- see KNOWN_ISSUES P.
+    """
+    ams = series.groupby(series.index.year).max().dropna()
+    if len(ams) < MIN_YEARS_FOR_RETURN:
+        return float("nan")
+    from geoglows.analyze import gumbel1
+    return float(gumbel1(T, float(ams.mean()), float(ams.std(ddof=0))))
+
+
+def _flood_events(flag: np.ndarray, sep: int = FLOOD_SEP) -> np.ndarray:
+    """Start index of each separate flood: runs of exceedance, declustered."""
+    starts = np.flatnonzero(np.diff(np.r_[0, flag.astype(np.int8)]) == 1)
+    if len(starts) == 0:
+        return starts
+    keep = [starts[0]]
+    for s in starts[1:]:
+        if s - keep[-1] >= sep:
+            keep.append(s)
+    return np.array(keep)
+
+
+def _flood_matched(starts: np.ndarray, other: np.ndarray,
+                   w: int = FLOOD_WINDOW) -> int:
+    """How many of `starts` have the other series flagged within +/- w days."""
+    n = len(other)
+    return sum(1 for s in starts
+               if other[max(0, s - w):min(n, s + w + 1)].any())
+
+
+def flood_stats(both: pd.DataFrame, t_obs: float, t_sim: float) -> dict:
+    """Does a modelled flood turn up when the gauge floods?
+
+      fl_n_obs     floods the gauge recorded
+      fl_n_sim     floods the model produced
+      fl_hits      gauge floods with a modelled flood within +/- 3 days
+      fl_false     modelled floods with no observed counterpart
+      fl_csi       hits / (hits + misses + false alarms)
+      fl_p_luck    chance of this many hits or more from a model with no skill
+      fl_verdict   -1 grey, 0 poor, 1 weak, 2 good, 3 strong
+
+    CSI rather than the plain hit rate because the hit rate can be inflated by
+    flooding more often, and CSI cannot: it carries the false alarms in its
+    denominator. On VPU 714 the two rank gauges at 0.96 correlation, but at the
+    1.4% of gauges that over-flood the hit rate says 0.24 where CSI says 0.11.
+    """
+    out = {}
+    if not (np.isfinite(t_obs) and np.isfinite(t_sim) and t_obs > 0 and t_sim > 0):
+        return out
+    fo = (both["obs"] >= t_obs).to_numpy()
+    fs = (both["sim"] >= t_sim).to_numpy()
+    eo, es = _flood_events(fo), _flood_events(fs)
+    out["fl_n_obs"], out["fl_n_sim"] = int(len(eo)), int(len(es))
+    if len(eo) < 5 or len(es) == 0:
+        return out                      # too few floods to say anything
+
+    hits = _flood_matched(eo, fs)
+    hits_sim = _flood_matched(es, fo)
+    false_alarms = len(es) - hits_sim
+    misses = len(eo) - hits
+    out["fl_hits"], out["fl_false"] = int(hits), int(false_alarms)
+    den = hits + false_alarms + misses
+    if den == 0:
+        return out
+    csi = hits / den
+    out["fl_csi"] = float(csi)
+
+    # A model with no skill still lands in some windows. Its per-flood chance is
+    # 1-(1-p)^(2w+1) where p is how often it floods -- so a model that floods
+    # more has a HIGHER bar, which is the point of testing per gauge.
+    p = float(fs.mean())
+    chance = 1.0 - (1.0 - p) ** (2 * FLOOD_WINDOW + 1)
+    from scipy.stats import binom
+    out["fl_p_luck"] = float(binom.sf(hits - 1, len(eo), chance))
+
+    if out["fl_p_luck"] > FLOOD_ALPHA:
+        out["fl_verdict"] = FLOOD_POOR
+    elif csi >= FLOOD_STRONG:
+        out["fl_verdict"] = FLOOD_STRONG_N
+    elif csi >= FLOOD_MIDDLE:
+        out["fl_verdict"] = FLOOD_GOOD
+    else:
+        out["fl_verdict"] = FLOOD_WEAK
+    return out
+
+
 # --- Decision: does the model tell wet days from dry days? ------------------ #
 # Scored from the `spearman` column the metric table already carries -- daily
 # rank correlation between modelled and observed flow -- so this needs no extra
@@ -2003,6 +2126,12 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
             if mode in ("decision", "both"):
                 st.update(hydrosos_stats(both))
                 st.update(trend_stats(both))
+                # Whole-record thresholds, as contingency_stats uses, so the
+                # 2-year level is one number throughout the file.
+                st.update(flood_stats(
+                    both,
+                    return_level(obs.reindex(model.index).dropna(), FLOOD_RP),
+                    return_level(sim.dropna(), FLOOD_RP)))
                 # A gauge answering neither decision is dropped only when the
                 # decisions are all that is being written. Under "both" it is
                 # kept -- it still has statistics -- and filtered out when the
@@ -2011,7 +2140,7 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
                 # other, and dropping it for failing either would silently
                 # shrink the other's map.
                 if (mode == "decision" and "hs_verdict" not in st
-                        and "tr_verdict" not in st):
+                        and "tr_verdict" not in st and "fl_verdict" not in st):
                     n_sparse += 1
                     continue
             # Every gauge attribute that reaches the parquet is listed here. A
@@ -2187,6 +2316,27 @@ def summarize_decision(m: pd.DataFrame) -> None:
         if not k.empty:
             print(f"  severe months judged on: median {k.median():.0f}, "
                   f"min {k.min():.0f}, max {k.max():.0f}")
+
+    if "fl_verdict" in m.columns:
+        print(f"\n{'='*62}\nDoes the model show a flood when the river floods?"
+              f"\n{'='*62}")
+        print(f"  floods above each series' own {FLOOD_RP}-year level, matched within "
+              f"+/-{FLOOD_WINDOW} days, {FLOOD_SEP}-day declustering")
+        print(f"  strong CSI >= {FLOOD_STRONG:.2f}, good >= {FLOOD_MIDDLE:.2f}, "
+              f"poor = luck not ruled out at p <= {FLOOD_ALPHA:.2f}\n")
+        f = m["fl_verdict"].fillna(FLOOD_GREY).astype(int)
+        for code in (FLOOD_STRONG_N, FLOOD_GOOD, FLOOD_WEAK, FLOOD_POOR, FLOOD_GREY):
+            n = int((f == code).sum())
+            print(f"    {FLOOD_LABELS[code]:48s} {n:6d}  {100*n/len(f):5.1f}%")
+        c = m.loc[f != FLOOD_GREY, "fl_csi"].dropna()
+        if not c.empty:
+            print(f"\n  CSI where scored: median {c.median():.3f}, "
+                  f"p25 {c.quantile(.25):.3f}, p75 {c.quantile(.75):.3f}")
+        if "fl_n_obs" in m.columns:
+            k = m.loc[f != FLOOD_GREY, "fl_n_obs"].dropna()
+            if not k.empty:
+                print(f"  floods judged on: median {k.median():.0f}, "
+                      f"min {k.min():.0f}, max {k.max():.0f}")
 
     if "tr_verdict" not in m.columns:
         return
