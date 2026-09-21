@@ -1754,6 +1754,100 @@ def _kappa(cs: np.ndarray, co: np.ndarray, linear: bool) -> float | None:
     return (p_o - p_e) / (1.0 - p_e)
 
 
+# --- Decision: is the annual volume of water representative? ---------------- #
+# The ONLY decision here whose bands come from published literature. Moriasi et
+# al. (2007), Table 4, Transactions of the ASABE 50(3):885-900 -- the standard
+# performance ratings for streamflow in hydrologic model evaluation. Every other
+# decision in this file has bands that were chosen; these were not.
+#
+# PBIAS = 100 * sum(sim - obs) / sum(obs), computed on daily paired values.
+# Measured on VPU 714: the time step does not matter (daily 10.45%, monthly
+# 10.37%, within 1.5 percentage points at every gauge, because PBIAS is a ratio
+# of sums) and taking the median of each year's bias instead moves only 1.7% of
+# gauges across a band. The standard statistic is used so the published bands
+# stay valid.
+#
+# Scored on the GLOBALLY BIAS-CORRECTED series, not the raw model: the raw model
+# is 66% unsatisfactory and correction takes that to 27%. Correction is what
+# makes this question answerable at all.
+VOLUME_VERY_GOOD = 10.0       # |PBIAS| below this
+VOLUME_GOOD = 15.0
+VOLUME_SATISFACTORY = 25.0    # above this is unsatisfactory
+
+VOLUME_GREY, VOLUME_BAD, VOLUME_OK, VOLUME_GOOD_N, VOLUME_BEST = -1, 0, 1, 2, 3
+VOLUME_LABELS = {-1: "no corrected series available",
+                 0: "unsatisfactory - |PBIAS| over 25%",
+                 1: "satisfactory - 15 to 25%",
+                 2: "good - 10 to 15%",
+                 3: "very good - under 10%"}
+
+
+def volume_verdict(pbias) -> int:
+    """Moriasi et al. (2007) streamflow performance rating from PBIAS."""
+    try:
+        p = abs(float(pbias))
+    except (TypeError, ValueError):
+        return VOLUME_GREY
+    if not np.isfinite(p):
+        return VOLUME_GREY
+    if p < VOLUME_VERY_GOOD:
+        return VOLUME_BEST
+    if p < VOLUME_GOOD:
+        return VOLUME_GOOD_N
+    if p < VOLUME_SATISFACTORY:
+        return VOLUME_OK
+    return VOLUME_BAD
+
+
+def corrected_series(river_id: int, sim: pd.Series) -> pd.Series | None:
+    """GEOGLOWS global bias correction for one reach, or None if unusable.
+
+    geoglows.bias.sfdc_bias_correction divides the simulation by a scalar read
+    from the published SFDC table. Where that table holds a zero the result is
+    inf, which is a defect in the published correction rather than in the model
+    or the gauge -- and it is not rare: measured across five VPUs the unusable
+    share runs from 4% (VPU 209) to 34% (VPU 208).
+
+    Note the function returns ONE column, overwriting the input, despite a
+    docstring promising two ("Simulated flow, Bias Corrected Simulation flow").
+    """
+    try:
+        from geoglows.bias import sfdc_bias_correction
+        # Silenced NARROWLY, around this call only. A zero scalar makes numpy
+        # emit "invalid value encountered in divide" per reach and per month,
+        # which buries the real output in thousands of lines and reads like a
+        # crash. The condition is not ignored -- it is exactly what the
+        # isfinite check below catches, and those reaches are reported as
+        # unusable rather than silently dropped.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out = sfdc_bias_correction(sim.to_frame(name="sim"), int(river_id))
+    except Exception:
+        return None
+    s = out[out.columns[-1]]
+    if not np.isfinite(s.to_numpy()).all():
+        return None
+    return s
+
+
+def volume_stats(sim_cor: pd.Series, obs: pd.Series) -> dict:
+    """PBIAS of the bias-corrected series against the gauge, and its rating.
+
+      vol_pbias    100 * sum(sim - obs) / sum(obs), on paired days
+      vol_n_days   paired days it was computed over
+      vol_verdict  -1 grey, 0 unsatisfactory, 1 satisfactory, 2 good, 3 very good
+    """
+    both = pd.concat([sim_cor.rename("sim"), obs.rename("obs")],
+                     axis=1, join="inner").dropna()
+    if len(both) < 365:
+        return {}
+    tot = float(both["obs"].sum())
+    if not (tot > 0):
+        return {}
+    p = 100.0 * (float(both["sim"].sum()) - tot) / tot
+    return {"vol_pbias": p, "vol_n_days": int(len(both)),
+            "vol_verdict": volume_verdict(p)}
+
+
 # --- Decision: does the model show a flood when the river floods? ----------- #
 # Each series is thresholded at ITS OWN 2-year level, so flood MAGNITUDE divides
 # out -- this establishes whether a flood shows up and when, not whether it was
@@ -2071,9 +2165,42 @@ def hydrosos_stats(both: pd.DataFrame) -> dict:
     return out
 
 
+def fetch_corrections(river_ids, model: pd.DataFrame) -> dict:
+    """Bias-corrected series for every reach, fetched in parallel.
+
+    Network-bound, one request per reach, so this is threaded rather than run
+    inside the gauge loop: measured 0.54s a reach serially against 0.21s at
+    twelve workers, i.e. ~23 minutes against ~9 for a full VPU.
+    """
+    ids = [int(r) for r in river_ids if int(r) in model.columns]
+    # Said up front, with an estimate: this is the one step that goes to the
+    # network, it is minutes not seconds, and it prints nothing while it runs.
+    # Without a warning it looks like the script has hung.
+    secs = len(ids) * 0.21
+    eta = (f"{secs:.0f} seconds" if secs < 90 else
+           f"{secs/60:.0f} minutes")
+    print(f"      bias correction: {len(ids):,} reaches over the network, "
+          f"{GAUGE_WORKERS} workers")
+    print(f"      roughly {eta}, and it prints nothing until it finishes")
+    t0 = time.time()
+    out, bad = {}, 0
+    with ThreadPoolExecutor(max_workers=GAUGE_WORKERS) as pool:
+        for rid, s in zip(ids, pool.map(
+                lambda r: corrected_series(r, model[r]), ids)):
+            if s is None:
+                bad += 1
+            else:
+                out[rid] = s
+    print(f"      corrected {len(out):,} in {(time.time()-t0)/60:.1f} min; "
+          f"{bad:,} unusable because the published SFDC table holds a zero "
+          f"for them -- a gap in the correction data, not in your gauges")
+    return out
+
+
 def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
                     min_years: float, source=None,
-                    mode: str = "statistic") -> pd.DataFrame:
+                    mode: str = "statistic",
+                    corrections: dict | None = None) -> pd.DataFrame:
     """Pair each gauge against its reach and compute the metric table."""
     # The threshold counts PAIRED DAYS, not elapsed years: a gauge reporting
     # sparsely for thirty years can still fail it. Print the day count so the
@@ -2132,6 +2259,12 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
                     both,
                     return_level(obs.reindex(model.index).dropna(), FLOOD_RP),
                     return_level(sim.dropna(), FLOOD_RP)))
+                # Volume is the one decision scored on the CORRECTED series;
+                # the raw model is 66% unsatisfactory on these bands.
+                if corrections is not None:
+                    cs = corrections.get(int(g.final_river_id))
+                    if cs is not None:
+                        st.update(volume_stats(cs, obs))
                 # A gauge answering neither decision is dropped only when the
                 # decisions are all that is being written. Under "both" it is
                 # kept -- it still has statistics -- and filtered out when the
@@ -2317,6 +2450,21 @@ def summarize_decision(m: pd.DataFrame) -> None:
             print(f"  severe months judged on: median {k.median():.0f}, "
                   f"min {k.min():.0f}, max {k.max():.0f}")
 
+    if "vol_verdict" in m.columns:
+        print(f"\n{'='*62}\nIs the annual volume of water representative?"
+              f"\n{'='*62}")
+        print("  PBIAS of the GEOGLOWS bias-corrected series against the gauge")
+        print(f"  bands from Moriasi et al. (2007) Table 4: very good <{VOLUME_VERY_GOOD:.0f}%,"
+              f" good <{VOLUME_GOOD:.0f}%, satisfactory <{VOLUME_SATISFACTORY:.0f}%\n")
+        v = m["vol_verdict"].fillna(VOLUME_GREY).astype(int)
+        for code in (VOLUME_BEST, VOLUME_GOOD_N, VOLUME_OK, VOLUME_BAD, VOLUME_GREY):
+            n = int((v == code).sum())
+            print(f"    {VOLUME_LABELS[code]:42s} {n:6d}  {100*n/len(v):5.1f}%")
+        pb = m.loc[v != VOLUME_GREY, "vol_pbias"].dropna()
+        if not pb.empty:
+            print(f"\n  PBIAS where scored: median {pb.median():+.1f}%, "
+                  f"median absolute {pb.abs().median():.1f}%")
+
     if "fl_verdict" in m.columns:
         print(f"\n{'='*62}\nDoes the model show a flood when the river floods?"
               f"\n{'='*62}")
@@ -2394,6 +2542,13 @@ def main() -> None:
     ap.add_argument("--end", default=DATE_END)
     ap.add_argument("--min-years", type=float, default=1.0,
                     help="minimum overlap between model and gauge")
+    ap.add_argument("--bias-correct", action="store_true",
+                    help="also score the VOLUME decision, which needs the "
+                         "GEOGLOWS global bias correction. This is the only "
+                         "part of a decision run that uses the network: one "
+                         "request per reach, about 9 minutes for a full VPU at "
+                         "12 workers. Off by default so a decision run stays "
+                         "offline.")
     ap.add_argument("--refresh", action="store_true",
                     help="re-read the zarr instead of using the local cache")
     ap.add_argument("--outdir", default=OUTPUT_DIR)
@@ -2471,7 +2626,14 @@ def main() -> None:
         print(f"      warm-up: dropped the first {args.warmup_years}y, "
               f"scoring {args.start} .. {args.end} ({len(model):,} days)")
 
-    metrics = compute_metrics(gauges, model, args.min_years, source, args.mode)
+    corrections = None
+    if args.bias_correct and args.mode in ("decision", "both"):
+        corrections = fetch_corrections(gauges["final_river_id"], model)
+    elif args.bias_correct:
+        print("      --bias-correct ignored: it only feeds the volume decision")
+
+    metrics = compute_metrics(gauges, model, args.min_years, source, args.mode,
+                              corrections)
 
     # Gauge attributes belong in both tables; everything named hs_* or tr_* is
     # a decision and belongs only in the decision one.

@@ -682,6 +682,20 @@ const METRICS = [
      { v:-1, key:"grey",  label:"Can't say",  note:"not enough data to judge" },
    ]},
 
+  // The ONLY decision here whose bands come from published literature:
+  // Moriasi et al. (2007) Table 4, the standard streamflow performance ratings
+  // in hydrologic model evaluation. Scored on the GEOGLOWS global bias
+  // correction, without which the raw model is 66% unsatisfactory.
+  {k:"vol_verdict", n:"Is the annual volume of water representative?", mode:"decision",
+   cat:1, dec:0,
+   states:[
+     { v: 3, key:"green", label:"Very good", note:"volume within 10% (Moriasi et al. 2007)" },
+     { v: 2, key:"good",  label:"Good",      note:"within 10–15%" },
+     { v: 1, key:"weak",  label:"Satisfactory", note:"within 15–25%" },
+     { v: 0, key:"no",    label:"Unsatisfactory", note:"off by more than 25%" },
+     { v:-1, key:"grey",  label:"Can't say", note:"no bias-corrected series for this reach" },
+   ]},
+
   // Floods above each series' OWN 2-year level, so magnitude divides out --
   // this says whether a flood turns up and when, NOT whether it was the right
   // size. "Strong" is the point where hits equal misses plus false alarms; no
@@ -1486,6 +1500,7 @@ function renderGauge(g) {
             : m.k === "tr_verdict" ? "Wetter or drier"
             : m.k === "wd_verdict" ? "Wet and dry days"
             : m.k === "fl_verdict" ? "Floods"
+            : m.k === "vol_verdict" ? "Volume of water"
             : "Severe low flow"}</h3>
       ${m.cat ? verdictPanel(g, m) :
         `<div class="hero"><span class="v num">${fmt(mval(g), m.dec)}</span></div>`}
@@ -1734,6 +1749,22 @@ function verdictPanel(g, m) {
   if (!s) return "";
   const head = `<div class="hero"><span class="v" style="color:${VERDICT_COLORS[s.key]}">` +
                `${s.label}</span></div><div class="meta">${s.note}</div>`;
+
+  if (m.k === "vol_verdict") {
+    if (s.key === "grey") {
+      return head + `<div class="meta" style="margin-top:6px">The published SFDC
+        correction table holds a zero for this reach, so no corrected series exists.
+        That is a gap in the correction data, not in the gauge record.</div>`;
+    }
+    const p = g.vol_pbias;
+    const dir = p == null ? "" : (p > 0 ? " too much water" : " too little water");
+    return head + `<table class="kv" style="margin-top:8px">
+      <tr><td>PBIAS</td><td class="num">${fmt(p, 1)}%${dir}</td></tr>
+      <tr><td>Days compared</td><td class="num">${(g.vol_n_days||0).toLocaleString()}</td></tr>
+    </table>
+    <div class="meta" style="margin-top:6px">Scored on the GEOGLOWS global bias correction.
+      Bands are the published streamflow ratings of Moriasi et al. (2007).</div>`;
+  }
 
   if (m.k === "fl_verdict") {
     if (s.key === "grey") {

@@ -3,9 +3,14 @@
 Scores modelled daily river discharge against observed stream gauges, one gauge at a time,
 and publishes the result as an interactive map, a per-gauge inspector and grouped summaries.
 
-Built to answer *"is this model any good, and where is it worst?"* for the GEOGLOWS v2
+Built to answer *"how well is this model performing at different gauges?"* for the GEOGLOWS v2
 retrospective, and to compare it against alternative model runs — routed output, parameter
 variants, anything that can be written as a parquet of discharge.
+
+It scores in **two modes**. *Statistics* reports the usual metrics — KGE', NSE, bias,
+contingency scores, all of them per calendar month as well. *Decisions* asks whether the model
+would inform a real decision correctly, and answers with a verdict per gauge rather than a
+number. Both come out of one run.
 
 Currently scoped to **VPU 714** (Missouri/Mississippi) as a demo.
 
@@ -30,8 +35,7 @@ The **catalog** may be `.xlsx` or `.csv`, and can be called anything. It needs t
 `final_river_id`, `gauge_id`, `ISO_A3`, `latitude`, `longitude`; `Koppen Group (as of 2024)`
 is optional and adds a grouping to the page.
 
-Local is faster — about 15 ms a gauge against 20 ms threaded and 148 ms unthreaded — needs no
-credentials, and works offline.
+Local is faster, needs no credentials, and works offline.
 
 *Shorthand:* if your files already sit the way `download_observed_data.py` writes them —
 `<dir>/routing/gauge_data/` beside `<dir>/master_catalog_with_metadata.xlsx` — then
@@ -40,9 +44,7 @@ over it.
 
 ### Reading from S3 instead
 
-The gauges are also published to a **private** bucket, `master-gauge-data`. Reading from it is
-**opt-in and never happens by default** — if there is no local data and you have not asked for
-S3, the run stops and tells you so rather than reaching for the network.
+The gauges are also published to a **private** bucket, `master-gauge-data`.
 
 Most people cannot reach this bucket. You need AWS credentials carrying `s3:ListBucket` on it
 and `s3:GetObject` on `production/*`. Check yours before running anything:
@@ -74,8 +76,8 @@ credentials, or pass `--model-parquet` to score your own run from a local source
 conda env create -f environment.yml && conda activate geoglows-eval
 ```
 
-Score the model. This always comes first, and writes the metrics parquet, the run config and a
-static PNG map into `outputs/`:
+Score the model. This always comes first, and writes the metrics parquet, the decision
+verdicts, the run configs and a static PNG map into `outputs/`:
 
 ```bash
 python kge_map.py --vpu 714
@@ -90,6 +92,68 @@ python serve.py --vpu 714
 Open <http://localhost:8765>. This is the way to use the tool day to day: it is the full
 version, and the only one that draws each gauge's **daily hydrograph**, read live when you
 click. It never writes a file, so re-running it costs nothing.
+
+### The two modes
+
+`--mode` defaults to **`both`**, which writes the metric table and the decision verdicts from
+one run. Use `statistic` or `decision` to write only one of them.
+
+In the browser, a **Mode** control switches between them and the metric picker becomes a
+**Question** picker. Each decision colours the map with one verdict per gauge, and clicking a
+gauge gives the arithmetic behind its colour in plain words.
+
+### The questions decision mode answers
+
+Five, each scored per gauge and each with its own idea of what "wrong" means:
+
+| Question | What is compared | Metric | Where the worst band comes from |
+|---|---|---|---|
+| **Does the model identify severe low flow?** | HydroSOS category 1 — the driest 10% of each calendar month, each series binned on its own record | catch rate on severe months | **derived** — a per-gauge binomial test against luck |
+| **Does the model show a flood when the river floods?** | floods above each series' own 2-year level, declustered, matched within ±3 days | CSI | **derived** — a per-gauge binomial test against luck |
+| **Is the annual volume of water representative?** | the GEOGLOWS bias-corrected series against the gauge | PBIAS | **published** — Moriasi et al. (2007) streamflow ratings |
+| **Does the model see how the river is changing?** | Mann-Kendall trend sign on annual mean flow, same window both series | trend direction agreement | significance of the trend test |
+| **Does the model tell wet days from dry days?** | daily modelled flow against daily gauge flow | Spearman rank correlation | **chosen** — no benchmark behind it |
+
+Four of the five divide magnitude out deliberately, by comparing each series against thresholds
+fitted from its *own* record. That is what makes them answerable: the raw model's flood
+magnitudes are off by more than a factor of two at roughly 40% of gauges, so anything resting on
+absolute values fails before it starts. The volume question is the exception, and it only works
+because the bias correction fixes exactly that.
+
+The last row is the weakest — its bands are judgment with nothing behind them, and it is flagged
+as such. **Check that column before quoting any verdict.**
+
+One question is deliberately **not** answered: whether flood *magnitudes* are right. It was
+measured and abandoned — demonstrating it at a single gauge needs about 145 years of overlapping
+record and no gauge has 100. The skill is real when pooled across gauges; it just cannot be
+resolved to an individual river. [DECISION_MODE.md](DECISION_MODE.md) has the working.
+
+### The volume decision needs the network
+
+One decision — *is the annual volume of water representative?* — is scored on the **GEOGLOWS
+global bias correction**, because the raw model is far too biased to answer it. That is the
+only part of a decision run that touches the network, so it is **off by default**:
+
+```bash
+python kge_map.py --vpu 714 --bias-correct
+```
+
+It fetches one correction per reach — **about 10 minutes for a full VPU** at 12 workers, during
+which it prints nothing. The run tells you the estimate before it starts, so you can tell it
+apart from a hang.
+
+Reaches where the published SFDC table holds a zero get no corrected series and come out grey.
+That share varies a lot by region — **4% to 34%** across the VPUs measured — and it is a gap in
+the published correction data, not a problem with your gauges.
+
+If you run the correction yourself rather than through `kge_map.py`, expect
+`RuntimeWarning: invalid value encountered in divide` from `geoglows/bias.py`, once per reach
+and month with a zero scalar. It is that same condition and it is harmless. `kge_map.py`
+silences it around that call only, detects the affected reaches and reports them as unusable,
+rather than letting thousands of warning lines bury the output.
+
+What each decision asks, what it compares and where its bands come from is in
+[DECISION_MODE.md](DECISION_MODE.md), along with every provisional number and what it costs.
 
 ### Only when you need to send it to someone
 
@@ -165,6 +229,7 @@ python build_webapp.py --vpu 714 --metrics outputs_v7/vpu714_metrics.parquet --o
 | `webapp/explorer.html` | the only frontend, shared by both deployments |
 | `ARCHITECTURE.md` | how the pieces connect and why — read before modifying anything |
 | `KNOWN_ISSUES.md` | data-quality problems, unconfirmed parameters, parked decisions |
+| `DECISION_MODE.md` | what each decision asks, every threshold behind it, and what each one costs |
 
 ## Reading the output
 
