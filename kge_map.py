@@ -351,10 +351,66 @@ GAUGE_DATE_TAG = "20251008"
 GAUGE_WORKERS = 12
 
 ZARR_URL = "http://geoglows-v2.s3-us-west-2.amazonaws.com/retrospective/daily.zarr"
+# Credentials for the store above. Empty for the public v2 zarr, which is plain
+# anonymous HTTP. An s3:// URL given with --model-zarr fills this from
+# --aws-profile, because a private bucket cannot be read anonymously.
+ZARR_STORAGE_OPTIONS: dict = {}
+
+
+def use_model_zarr(url: str, profile: str | None = None) -> None:
+    """Point the reader at a different retrospective zarr.
+
+    The cache stamp is f"zarr:{ZARR_URL}", so switching stores automatically
+    invalidates a cache built from the other one -- two models cannot be
+    silently mixed in one array.
+    """
+    global ZARR_URL, ZARR_STORAGE_OPTIONS
+    ZARR_URL = url
+    ZARR_STORAGE_OPTIONS = ({"profile": profile}
+                            if url.startswith("s3://") and profile else {})
+
+
+def zarr_store():
+    """The zarr mapper for whichever store is configured."""
+    import fsspec
+    return fsspec.get_mapper(ZARR_URL, **ZARR_STORAGE_OPTIONS)
 MODEL_TABLE_URL = "http://geoglows-v2.s3-us-west-2.amazonaws.com/tables/v2-model-table.parquet"
 
 # The zarr time axis is "seconds since 1940-01-01", daily steps.
 ZARR_EPOCH = pd.Timestamp("1940-01-01")
+
+
+def zarr_times(z) -> pd.DatetimeIndex:
+    """Decode the time axis from whatever the store declares.
+
+    v2 says "seconds since 1940-01-01" and v3 "hours since 1979-01-01", so the
+    epoch and the unit are both read from the array's own attrs rather than
+    assumed. ZARR_EPOCH remains the fallback for a store carrying no units.
+    """
+    raw = z["time"][:]
+    units = str(dict(z["time"].attrs).get("units", "")).strip()
+    m = re.match(r"(\w+)\s+since\s+(.+)", units)
+    if not m:
+        return pd.DatetimeIndex(ZARR_EPOCH + pd.to_timedelta(raw, unit="s"))
+    unit, epoch = m.group(1).lower(), m.group(2).strip()
+    unit = {"seconds": "s", "second": "s", "hours": "h", "hour": "h",
+            "days": "D", "day": "D", "minutes": "m",
+            "minute": "m"}.get(unit, "s")
+    base = pd.Timestamp(epoch)
+    if base.tzinfo is not None:
+        base = base.tz_convert("UTC").tz_localize(None)
+    return pd.DatetimeIndex(base + pd.to_timedelta(raw, unit=unit))
+
+
+def zarr_river_ids(z) -> np.ndarray:
+    """The reach-id array, whatever the store calls it.
+
+    v2 names it `river_id`, v3 `riverId`.
+    """
+    for name in ("river_id", "riverId", "rivid", "river_ids"):
+        if name in z:
+            return np.asarray(z[name][:])
+    raise KeyError(f"no reach-id array in this zarr; found {list(z.array_keys())}")
 
 # Fetch window for the model array -- and the evaluation window too, unless
 # --warmup-years trims the front of it. None means "everything the model covers",
@@ -928,8 +984,28 @@ def note_unused_data_dir(args, source) -> None:
               f"      They apply to --gauge-source local.")
 
 
-def build_gauge_table(vpu: int, source) -> pd.DataFrame:
-    """Catalog gauges in `vpu` that have a real reach id, network attrs, and a CSV."""
+# Catalog columns carried through as GROUPINGS on the summary tab. Named, not
+# inferred: sniffing the catalog for "probably categorical" columns would guess
+# wrong on ids and on anything numeric-but-categorical, and this project names
+# its inputs rather than deriving them. The default keeps Koppen working for
+# existing runs with no flag.
+GROUP_DEFAULT = "Koppen Group (as of 2024)"
+
+# Column prefixes that belong to the decision table rather than the metric one.
+# hs_ severe low flow, tr_ wetter or drier, fl_ floods, vol_ volume.
+# wd_ is absent on purpose: it is derived in serve.py from the `spearman`
+# column the metric table already carries, so it is never written here.
+DECISION_PREFIXES = ("hs_", "tr_", "fl_", "vol_")
+
+
+def build_gauge_table(vpu: int, source, groups: list[str] | None = None
+                      ) -> pd.DataFrame:
+    """Catalog gauges in `vpu` that have a real reach id, network attrs, and a CSV.
+
+    `groups` names catalog columns to carry as groupings. Each becomes g0, g1...
+    in the table; run.json records which original column each key came from, so
+    the page can label them without the catalog.
+    """
     print(f"[1/5] building gauge table for VPU {vpu} from {source.describe()}")
 
     cat = source.catalog()
@@ -964,20 +1040,33 @@ def build_gauge_table(vpu: int, source) -> pd.DataFrame:
     keep = [
         "final_river_id", "gauge_id", "fname", "loc", "latitude", "longitude",
         "ISO_A3", "river_name", "strmOrder", "USContArea",
-        # Local runs only -- the bucket catalog has no Koppen equivalent, so an
-        # S3 run carries no such column and compute_metrics() writes None.
-        "Koppen Group (as of 2024)",
     ]
+    # Grouping columns become g0, g1... A name that is not in this catalog is
+    # reported rather than silently dropped -- an S3 run has no Koppen column,
+    # and a typo in --group-by should not look like an empty grouping.
+    wanted = [c for c in (groups or []) if c]
+    gmap = {}
+    for i, col in enumerate(wanted):
+        if col in g.columns:
+            key = f"g{i}"
+            gmap[key] = col
+            g = g.rename(columns={col: key})
+            keep.append(key)
+        else:
+            print(f"      --group-by {col!r}: not a column in this catalog, skipped")
     keep = [c for c in keep if c in g.columns]
-    g = g[keep].rename(columns={"Koppen Group (as of 2024)": "koppen"})
+    g = g[keep]
+    g.attrs["groups"] = gmap
 
     # gauge_id mixes numeric USGS ids with alphanumeric ones (Canadian HYDAT
     # codes, for instance), so pandas infers `object`; force str for a clean
     # parquet schema.
-    for c in ("gauge_id", "koppen", "river_name", "ISO_A3"):
+    for c in ["gauge_id", "river_name", "ISO_A3"] + list(gmap):
         if c in g.columns:
             g[c] = g[c].astype(str)
-    return g.reset_index(drop=True)
+    out = g.reset_index(drop=True)
+    out.attrs["groups"] = gmap
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -991,8 +1080,8 @@ def model_period() -> tuple[str, str]:
     """
     import fsspec
     import zarr
-    z = zarr.open(fsspec.get_mapper(ZARR_URL), mode="r")
-    t = ZARR_EPOCH + pd.to_timedelta(z["time"][:], unit="s")
+    z = zarr.open(zarr_store(), mode="r")
+    t = zarr_times(z)
     return t[0].strftime("%Y-%m-%d"), t[-1].strftime("%Y-%m-%d")
 
 
@@ -1055,9 +1144,9 @@ def fetch_model_q(
 
     print(f"[2/5] reading model discharge from {ZARR_URL}")
     t0 = time.time()
-    z = zarr.open(fsspec.get_mapper(ZARR_URL), mode="r")
+    z = zarr.open(zarr_store(), mode="r")
 
-    all_ids = z["river_id"][:]
+    all_ids = zarr_river_ids(z)
     pos = pd.Series(np.arange(len(all_ids)), index=all_ids)
     idx = pos.reindex(river_ids)
     if idx.isna().any():
@@ -1067,7 +1156,7 @@ def fetch_model_q(
     river_ids = np.asarray(river_ids)[ok.values]
     col_idx = idx[ok].astype(int).values
 
-    times = ZARR_EPOCH + pd.to_timedelta(z["time"][:], unit="s")
+    times = zarr_times(z)
     tmask = (times >= pd.Timestamp(date_start)) & (times <= pd.Timestamp(date_end))
     # Stop if the window misses the model record entirely. np.argmax on an
     # all-False mask returns 0 rather than signalling failure, and so does the
@@ -1829,23 +1918,31 @@ def corrected_series(river_id: int, sim: pd.Series) -> pd.Series | None:
     return s
 
 
-def volume_stats(sim_cor: pd.Series, obs: pd.Series) -> dict:
+def volume_stats(sim_cor: pd.Series, sim_raw: pd.Series,
+                 obs: pd.Series) -> dict:
     """PBIAS of the bias-corrected series against the gauge, and its rating.
 
-      vol_pbias    100 * sum(sim - obs) / sum(obs), on paired days
-      vol_n_days   paired days it was computed over
-      vol_verdict  -1 grey, 0 unsatisfactory, 1 satisfactory, 2 good, 3 very good
+      vol_pbias      100 * sum(sim - obs) / sum(obs), corrected, on paired days
+      vol_pbias_raw  the same for the UNCORRECTED model
+      vol_n_days     paired days both were computed over
+      vol_verdict    -1 grey, 0 unsatisfactory, 1 satisfactory, 2 good, 3 very good
+
+    The raw figure is computed here rather than taken from `pbias_pct` in the
+    metric table so the two rest on the IDENTICAL day set. Otherwise a gauge
+    could appear to have been improved or worsened by the correction when the
+    difference was really which days each was measured over.
     """
-    both = pd.concat([sim_cor.rename("sim"), obs.rename("obs")],
-                     axis=1, join="inner").dropna()
+    both = pd.concat([sim_cor.rename("cor"), sim_raw.rename("raw"),
+                      obs.rename("obs")], axis=1, join="inner").dropna()
     if len(both) < 365:
         return {}
     tot = float(both["obs"].sum())
     if not (tot > 0):
         return {}
-    p = 100.0 * (float(both["sim"].sum()) - tot) / tot
-    return {"vol_pbias": p, "vol_n_days": int(len(both)),
-            "vol_verdict": volume_verdict(p)}
+    pb = lambda c: 100.0 * (float(both[c].sum()) - tot) / tot
+    p = pb("cor")
+    return {"vol_pbias": p, "vol_pbias_raw": pb("raw"),
+            "vol_n_days": int(len(both)), "vol_verdict": volume_verdict(p)}
 
 
 # --- Decision: does the model show a flood when the river floods? ----------- #
@@ -2205,6 +2302,7 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
     # The threshold counts PAIRED DAYS, not elapsed years: a gauge reporting
     # sparsely for thirty years can still fail it. Print the day count so the
     # filter cannot be misread as a span. See KNOWN_ISSUES section Q.
+    group_keys = [c for c in gauges.columns if re.fullmatch(r"g\d+", c)]
     min_days = int(round(min_years * 365.25))
     print(f"[3/5] pairing {len(gauges)} gauges "
           f"(minimum {min_days:,} paired days = {min_years}y)")
@@ -2264,7 +2362,7 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
                 if corrections is not None:
                     cs = corrections.get(int(g.final_river_id))
                     if cs is not None:
-                        st.update(volume_stats(cs, obs))
+                        st.update(volume_stats(cs, sim, obs))
                 # A gauge answering neither decision is dropped only when the
                 # decisions are all that is being written. Under "both" it is
                 # kept -- it still has statistics -- and filtered out when the
@@ -2279,10 +2377,12 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
             # Every gauge attribute that reaches the parquet is listed here. A
             # column kept by build_gauge_table() but missing from this call is
             # silently dropped, so the two lists have to be changed together.
+            for _k in group_keys:
+                st[_k] = getattr(g, _k, None)
             st.update(final_river_id=g.final_river_id, gauge_id=g.gauge_id,
                       fname=g.fname, latitude=g.latitude, longitude=g.longitude,
                       strmOrder=g.strmOrder, USContArea=g.USContArea,
-                      koppen=getattr(g, "koppen", None), ISO_A3=g.ISO_A3,
+                      ISO_A3=g.ISO_A3,
                       river_name=getattr(g, "river_name", None),
                       first_day=both.index.min(), last_day=both.index.max())
             rows.append(st)
@@ -2461,9 +2561,18 @@ def summarize_decision(m: pd.DataFrame) -> None:
             n = int((v == code).sum())
             print(f"    {VOLUME_LABELS[code]:42s} {n:6d}  {100*n/len(v):5.1f}%")
         pb = m.loc[v != VOLUME_GREY, "vol_pbias"].dropna()
+        raw = m.loc[v != VOLUME_GREY, "vol_pbias_raw"].dropna()
         if not pb.empty:
             print(f"\n  PBIAS where scored: median {pb.median():+.1f}%, "
                   f"median absolute {pb.abs().median():.1f}%")
+        if not raw.empty:
+            print(f"  before correction : median {raw.median():+.1f}%, "
+                  f"median absolute {raw.abs().median():.1f}%")
+            j = m.loc[v != VOLUME_GREY, ["vol_pbias", "vol_pbias_raw"]].dropna()
+            if len(j):
+                better = (j.vol_pbias.abs() < j.vol_pbias_raw.abs()).mean()
+                print(f"  correction improved the volume at {100*better:.0f}% "
+                      f"of scored gauges")
 
     if "fl_verdict" in m.columns:
         print(f"\n{'='*62}\nDoes the model show a flood when the river floods?"
@@ -2542,6 +2651,18 @@ def main() -> None:
     ap.add_argument("--end", default=DATE_END)
     ap.add_argument("--min-years", type=float, default=1.0,
                     help="minimum overlap between model and gauge")
+    ap.add_argument("--model-zarr", default=None,
+                    help="score a different retrospective zarr instead of the "
+                         "public GEOGLOWS v2 one -- an https:// URL, or an "
+                         "s3:// URL with --aws-profile for a private bucket. "
+                         "The cache is keyed on the store, so two zarrs can "
+                         "never be mixed in one array. Set --label to name it.")
+    ap.add_argument("--group-by", default=GROUP_DEFAULT,
+                    help="comma-separated catalog columns to offer as "
+                         "groupings on the summary tab. Named explicitly, not "
+                         "guessed. Defaults to the Koppen column; pass an empty "
+                         "string for none. A name absent from your catalog is "
+                         "reported and skipped.")
     ap.add_argument("--bias-correct", action="store_true",
                     help="also score the VOLUME decision, which needs the "
                          "GEOGLOWS global bias correction. This is the only "
@@ -2570,6 +2691,14 @@ def main() -> None:
     # and neither a wrong --data-dir nor a missing credential should cost that.
     # Constructing the source is itself the check -- the local backend stats its
     # inputs, the S3 one lists the bucket.
+    if args.model_zarr:
+        if args.model_parquet:
+            sys.exit("--model-zarr and --model-parquet name two different "
+                     "models; pass one.")
+        use_model_zarr(args.model_zarr, args.aws_profile)
+        print(f"model: {ZARR_URL}"
+              + (f" (profile {args.aws_profile})" if ZARR_STORAGE_OPTIONS else ""))
+
     source = source_from_args(args)
     note_unused_data_dir(args, source)
 
@@ -2590,7 +2719,10 @@ def main() -> None:
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    gauges = build_gauge_table(args.vpu, source)
+    group_names = [c.strip() for c in (args.group_by or "").split(",") if c.strip()]
+    gauges = build_gauge_table(args.vpu, source, group_names)
+    groups_meta = [{"key": k, "name": v}
+                   for k, v in gauges.attrs.get("groups", {}).items()]
     if args.model_parquet:
         model = model_q_from_parquet(args.model_parquet,
                                      gauges["final_river_id"].to_numpy(),
@@ -2638,9 +2770,14 @@ def main() -> None:
     # Gauge attributes belong in both tables; everything named hs_* or tr_* is
     # a decision and belongs only in the decision one.
     ATTRS = ("final_river_id", "gauge_id", "fname", "latitude", "longitude",
-             "strmOrder", "USContArea", "koppen", "ISO_A3", "river_name",
-             "first_day", "last_day", "n_pairs")
-    is_decision = lambda c: c.startswith(("hs_", "tr_"))
+             "strmOrder", "USContArea", "ISO_A3", "river_name",
+             "first_day", "last_day", "n_pairs") + tuple(
+                 c for c in metrics.columns if re.fullmatch(r"g\d+", c))
+    # EVERY decision's prefix must be here or its columns are silently dropped
+    # from the decision table while the console summary, which reads the
+    # in-memory frame, still reports them. Adding a decision means adding its
+    # prefix here.
+    is_decision = lambda c: c.startswith(DECISION_PREFIXES)
 
     written = []
     if args.mode in ("statistic", "both"):
@@ -2699,6 +2836,7 @@ def main() -> None:
                 # version of its own, so without this the same command can
                 # produce different numbers from a re-downloaded copy with
                 # nothing saying so; for S3 the snapshot tag pins it exactly.
+                "groups": groups_meta,
                 "gauge_source": source.kind,
                 "gauge_source_detail": source.describe(),
                 "kge_col": KGE_COL,

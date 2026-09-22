@@ -1492,7 +1492,8 @@ function renderGauge(g) {
     <div class="meta">
       ${g.lat.toFixed(3)}°, ${g.lon.toFixed(3)}° · order ${g.so ?? "—"} ·
       ${g.da!=null ? sig(g.da)+" km² upstream" : "area —"}<br>
-      ${g.y0}–${g.y1} · ${(g.n_pairs/365.25).toFixed(0)} yr paired${g.kp ? " · "+g.kp : ""}
+      ${g.y0}–${g.y1} · ${(g.n_pairs/365.25).toFixed(0)} yr paired${
+        ((D.groups||[]).map(q => g[q.key]).filter(Boolean)[0]) ? " · "+(D.groups||[]).map(q => g[q.key]).filter(Boolean)[0] : ""}
     </div>
 
     <div class="sec">
@@ -1756,13 +1757,28 @@ function verdictPanel(g, m) {
         correction table holds a zero for this reach, so no corrected series exists.
         That is a gap in the correction data, not in the gauge record.</div>`;
     }
-    const p = g.vol_pbias;
-    const dir = p == null ? "" : (p > 0 ? " too much water" : " too little water");
+    const p = g.vol_pbias, praw = g.vol_pbias_raw;
+    const dir = v => v == null ? "" : (v > 0 ? "too much water" : "too little water");
+    // Both are computed over the identical day set, so the pair is a statement
+    // about what the correction did at THIS gauge -- which is not always help.
+    const verdictOfRaw = v => v == null ? "" :
+      Math.abs(v) < 10 ? "very good" : Math.abs(v) < 15 ? "good"
+      : Math.abs(v) < 25 ? "satisfactory" : "unsatisfactory";
+    let note = "";
+    if (p != null && praw != null) {
+      const d = Math.abs(praw) - Math.abs(p);
+      note = Math.abs(d) < 0.5 ? "The correction barely changed this gauge."
+           : d > 0 ? `The correction improved it by ${d.toFixed(1)} percentage points.`
+                   : `The correction made it worse by ${(-d).toFixed(1)} percentage points.`;
+    }
     return head + `<table class="kv" style="margin-top:8px">
-      <tr><td>PBIAS</td><td class="num">${fmt(p, 1)}%${dir}</td></tr>
+      <tr><td>Before correction</td><td class="num">${fmt(praw, 1)}% ${dir(praw)}</td></tr>
+      <tr><td><b>After correction</b></td><td class="num"><b>${fmt(p, 1)}% ${dir(p)}</b></td></tr>
+      <tr><td>Rating before</td><td>${verdictOfRaw(praw)}</td></tr>
       <tr><td>Days compared</td><td class="num">${(g.vol_n_days||0).toLocaleString()}</td></tr>
     </table>
-    <div class="meta" style="margin-top:6px">Scored on the GEOGLOWS global bias correction.
+    <div class="meta" style="margin-top:6px">${note}</div>
+    <div class="meta" style="margin-top:4px">Scored on the GEOGLOWS global bias correction.
       Bands are the published streamflow ratings of Moriasi et al. (2007).</div>`;
   }
 
@@ -2034,12 +2050,26 @@ function floodBlock(g) {
 // by a categorical season/group palette. Two reasons: the group is already named
 // on the axis so a second encoding of it would be redundant, and it keeps one
 // visual language across the whole page.
-const GROUPINGS = [
+// Overall, stream order and month are intrinsic. Everything between them comes
+// from the catalog via --group-by and is named in the payload, so adding a
+// column to your catalog and naming it on the command line is all it takes to
+// get a new grouping here -- no change to this file.
+// Filled by rebuildGroupings() once the payload has landed -- the catalog
+// groupings are named in the payload, so this cannot be a load-time const.
+let GROUPINGS = [
   { k: "overall", n: "Overall" },
   { k: "so",      n: "Stream order" },
-  { k: "kp",      n: "Köppen group" },
   { k: "month",   n: "Month" },
 ];
+function rebuildGroupings() {
+  const cat = ((D && D.groups) || []).map(g => ({ k: g.key, n: g.name }));
+  GROUPINGS = [
+    { k: "overall", n: "Overall" },
+    { k: "so",      n: "Stream order" },
+    ...cat,
+    { k: "month",   n: "Month" },
+  ];
+}
 // Month is the one grouping that is cyclical, which is the one case a polar
 // layout genuinely earns: December sits next to January, as it should.
 const SUM = { group: "so", metric: "kge_2012", monthMetric: "kge_2012" };
@@ -2065,7 +2095,7 @@ function summaryRows() {
   if (SUM.group === "overall") {
     return [{ label: "All gauges", stats: statsFor(gs.map(g => g[SUM.metric])) }];
   }
-  const key = SUM.group;                       // "so" or "kp"
+  const key = SUM.group;                       // "so", "month", or a g0/g1 catalog grouping
   const buckets = new Map();
   for (const g of gs) {
     const v = g[key];
@@ -2440,6 +2470,8 @@ async function boot() {
       return;
     }
   }
+
+  rebuildGroupings();
 
   const pctl = (a,p) => { const v = a.filter(x=>x!=null&&isFinite(x)&&x>0).sort((x,y)=>x-y);
     return v.length ? v[Math.min(v.length-1, Math.floor(p*(v.length-1)))] : null; };

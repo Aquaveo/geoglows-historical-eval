@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import traceback
 from functools import lru_cache
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -81,7 +82,7 @@ DECISION_FIELDS = ('hs_verdict', 'hs_xdry_pod', 'hs_xdry_n_events',
                    'tr_verdict', 'tr_obs', 'tr_sim', 'tr_n_years',
                    'fl_verdict', 'fl_csi', 'fl_n_obs', 'fl_n_sim', 'fl_hits',
                    'fl_false', 'fl_p_luck',
-                   'vol_verdict', 'vol_pbias', 'vol_n_days',
+                   'vol_verdict', 'vol_pbias', 'vol_pbias_raw', 'vol_n_days',
                    'wd_verdict')
 
 # Every verdict column, each filled with its own grey code for gauges the
@@ -90,6 +91,7 @@ DECISION_FIELDS = ('hs_verdict', 'hs_xdry_pod', 'hs_xdry_n_events',
 VERDICT_COLS = ('hs_verdict', 'tr_verdict', 'fl_verdict', 'vol_verdict')
 
 STATE: dict = {}
+GROUP_KEYS: list[str] = []
 
 
 def r3(x):
@@ -197,6 +199,9 @@ def merge_decisions(m: pd.DataFrame, path: str, cfg: dict) -> pd.DataFrame:
 
 def load_gauges(vpu: int, metrics_path: str) -> dict:
     m = pd.read_parquet(metrics_path)
+    # g0, g1... are the grouping columns build_gauge_table carried through.
+    global GROUP_KEYS
+    GROUP_KEYS = [c for c in m.columns if re.fullmatch(r"g\d+", c)]
     dpath = decisions_beside(metrics_path, vpu)
     if dpath:
         m = merge_decisions(m, dpath, STATE["cfg"])
@@ -208,7 +213,8 @@ def load_gauges(vpu: int, metrics_path: str) -> dict:
             "lon": r3(r.longitude), "lat": r3(r.latitude),
             "so": int(r.strmOrder) if pd.notna(r.strmOrder) else None,
             "da": r3(r.USContArea / 1e6) if pd.notna(r.USContArea) else None,
-            "kp": str(r.koppen) if pd.notna(r.koppen) else None,
+            **{k: (str(getattr(r, k)) if pd.notna(getattr(r, k, None)) else None)
+               for k in GROUP_KEYS},
             "cc": str(r.ISO_A3),
             "rn": (str(r.river_name) if getattr(r, "river_name", None)
                    and str(r.river_name) != "nan" else None),
@@ -234,6 +240,9 @@ def load_gauges(vpu: int, metrics_path: str) -> dict:
             "bbox": [r3(v) for v in _bb[:4]],
             "nOutside": _bb[4],
             "vpu": vpu, "noSkill": KGE_NO_SKILL,
+            # [{key, name}] -- which catalog columns were carried as groupings,
+            # and what to call them. Empty when --group-by named none.
+            "groups": STATE["cfg"].get("groups", []),
             "label": STATE["cfg"]["label"],
             # Why decision mode is absent, when a decision parquet exists but
             # could not be used. None when there is nothing to explain.

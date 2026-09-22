@@ -10,7 +10,7 @@ variants, anything that can be written as a parquet of discharge.
 It scores in **two modes**. *Statistics* reports the usual metrics — KGE', NSE, bias,
 contingency scores, all of them per calendar month as well. *Decisions* asks whether the model
 would inform a real decision correctly, and answers with a verdict per gauge rather than a
-number. Both come out of one run.
+number. It is aimed at a non-technical audience to interpret the results. Both come out of one run.
 
 Currently scoped to **VPU 714** (Missouri/Mississippi) as a demo.
 
@@ -32,12 +32,22 @@ source ~/.bashrc
 Or per run: `--gauge-dir /path/to/gauge/csvs --catalog /path/to/your_catalog.xlsx`.
 
 The **catalog** may be `.xlsx` or `.csv`, and can be called anything. It needs the columns
-`final_river_id`, `gauge_id`, `ISO_A3`, `latitude`, `longitude`; `Koppen Group (as of 2024)`
-is optional and adds a grouping to the page.
+`final_river_id`, `gauge_id`, `ISO_A3`, `latitude`, `longitude`.
+
+**Any other column can become a grouping on the summary tab.** Name it with `--group-by` and it
+appears there beside stream order and month:
+
+```bash
+python kge_map.py --vpu 714 --group-by "Koppen Group (as of 2024),Basin,Regulated"
+```
+
+Comma-separated, and it defaults to the Köppen column so existing runs are unchanged. Pass
+`--group-by ""` for none. A name that is not in your catalog is
+reported and skipped rather than silently producing an empty grouping.
 
 Local is faster, needs no credentials, and works offline.
 
-*Shorthand:* if your files already sit the way `download_observed_data.py` writes them —
+*Shorthand:* if your files already sit the way they are in aws  —
 `<dir>/routing/gauge_data/` beside `<dir>/master_catalog_with_metadata.xlsx` — then
 `--data-dir <dir>` (or `$GEOGLOWS_EVAL_DATA`) fills in both. Anything you name explicitly wins
 over it.
