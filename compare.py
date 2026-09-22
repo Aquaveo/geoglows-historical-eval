@@ -93,6 +93,10 @@ DECISION_SPECS = [
 ]
 
 MIN_GROUP = 15          # a group with fewer paired gauges than this is not shown
+# Below this fractional change, the direction of a difference is not reported:
+# the share of gauges moving one way is well determined even when the amount is
+# nil, so quoting it implies a shift that is not there.
+NEGLIGIBLE = 0.005      # 0.5%
 
 
 # --------------------------------------------------------------------------- #
@@ -396,13 +400,23 @@ def character_rows(j: pd.DataFrame) -> list[dict]:
         # distinction that matters here.
         r = (pair[cb] / pair[ca]).replace([np.inf, -np.inf], np.nan).dropna()
         r = r[r > 0]
+        rat = float(r.median()) if len(r) else float("nan")
+        # A share is only reported when the change is big enough for its
+        # direction to mean anything. Mean flow moved by 0.02% between these two
+        # runs -- a median ratio of 0.99977, which rounds to 1.00 -- and yet 80%
+        # of gauges fell on the low side of it. "Lower at 80%" there is counting
+        # which side of zero a rounding-level difference landed on, and reads as
+        # a systematic shift when the honest answer is that nothing changed.
+        negligible = (not np.isfinite(rat)) or abs(rat - 1.0) < NEGLIGIBLE
         out.append({
             "name": name, "unit": unit, "dec": dec, "n": int(len(pair)),
             "a": va, "b": vb, "obs": obs,
-            "ratio": float(r.median()) if len(r) else float("nan"),
+            "ratio": rat,
             "r25": float(r.quantile(.25)) if len(r) else float("nan"),
             "r75": float(r.quantile(.75)) if len(r) else float("nan"),
-            "down": float((r < 1).mean()) if len(r) else float("nan"),
+            "down": float("nan") if negligible else
+                    (float((r < 1).mean()) if len(r) else float("nan")),
+            "negligible": bool(negligible),
         })
     return out
 
@@ -552,10 +566,14 @@ both runs by construction and is what each is read against.</p>
 <th></th></tr></thead><tbody>""")
         for c in char:
             rat = c["ratio"]
-            far = np.isfinite(rat) and abs(rat - 1) > 0.10
             share = c["down"]
             note = ""
-            if np.isfinite(share) and (share > 0.95 or share < 0.05):
+            if c["negligible"]:
+                note = ("<span title='the two runs differ by less than "
+                        "0.5% here, so which way individual gauges moved is not "
+                        "reported -- it would read as a shift that is not there'"
+                        " style='color:var(--ink-3)'>no real change</span>")
+            elif np.isfinite(share) and (share > 0.95 or share < 0.05):
                 note = ("<span title='the same direction at essentially every "
                         "gauge, so this is systematic rather than a few outliers'"
                         " style='color:var(--ink-3)'>&#9679; systematic</span>")
