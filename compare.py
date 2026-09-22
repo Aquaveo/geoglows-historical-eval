@@ -827,9 +827,12 @@ def main() -> None:
     win.update(decision_winners(j))
     mp = map_payload(a, b, j, win, args.vpu)
 
-    out = args.out or os.path.join(
-        os.path.dirname(args.b.rstrip("/")) or ".",
-        f"vpu{args.vpu}_compare.html")
+    # Default INTO the --b output directory, not beside it. Beside it means the
+    # repository root when --b is "outputs_v3", and a generated 300 KB page
+    # landing in the repo root gets swept into a commit by anyone using
+    # `git add -A`. The outputs*/ directories are already gitignored.
+    out = args.out or os.path.join(args.b.rstrip("/"),
+                                   f"vpu{args.vpu}_compare.html")
     print(f"[4/4] writing {out}")
     with open(out, "w", encoding="utf-8") as fh:
         fh.write(render(a, b, j, rows, trans, top, mp, char))
