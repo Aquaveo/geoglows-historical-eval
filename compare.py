@@ -10,27 +10,44 @@ it, the same deal as build_webapp.py.
 
 WHAT IT COMPARES, AND WHY IT IS BUILT THIS WAY
 ----------------------------------------------
-Three sections, in decreasing order of how much the data can support:
+Five sections, in roughly decreasing order of how much the data supports them:
 
-  1. Grouped summary -- every grouping the runs carry (overall, stream order,
-     month, and any --group-by catalog columns) x every metric, both runs side
-     by side with the change. This is where "which got worse and in which ways"
-     is answered, and it is the best-powered object here: ~1,700 paired gauges
-     split across six stream orders is ~280 a group.
+  1. What the two runs look like -- each run's OUTPUT before any question of
+     skill: mean flow, day-to-day variability, 2-year flood level, and the
+     alpha/beta/gamma ratios against the gauge. A systematic difference shows up
+     here in one line where the skill metrics can be ambiguous about it. On v2
+     against the RFS v3 sample this section says the whole story: identical mean
+     flow, variability down 22% and flood levels halved, at 100% of gauges.
 
-  2. Decision transitions -- a matrix per decision. A verdict moving Weak ->
-     Good is not a delta, it is a move between categories, and counting those
-     moves says more than any average of them.
+  2. Grouped summary -- every grouping the runs carry x every metric, median AND
+     mean for both runs. Best-powered object here: a grouping splits ~1,700
+     paired gauges into a handful of buckets, so each figure rests on hundreds.
+     Both averages are shown because a change can live entirely in the tails,
+     and rows where they disagree about direction are flagged.
 
-  3. Per-gauge detail -- the tail of the distribution, the gauges that moved
-     most in each direction. NOT a map: a delta map is the one object here that
-     works at per-gauge resolution, and whether it is trustworthy depends on how
-     large the real differences turn out to be. Deferred until we have looked.
+  3. Decision transitions -- a matrix per decision. A verdict moving Weak -> Good
+     is not a delta, it is a move between categories, and counting the moves says
+     more than averaging them.
+
+  4. Map -- coloured by WHICH RUN WON, not by how much. The size of a per-gauge
+     difference is poorly determined; its SIGN is not, because the comparison is
+     paired. Four states, including one for gauges scored by only one run, taken
+     from the UNION rather than the intersection because that is what a
+     comparison most easily hides.
+
+  5. Movers -- the tails, labelled as tails rather than as findings.
 
 The comparison is PAIRED: same gauge, same observations, same days, only the
 model differs. That matters -- sampling noise is largely shared between the two
-estimates and cancels in the difference, so a paired delta is far better
+estimates and cancels in the difference, so a paired comparison is far better
 determined than the gap between two independent estimates would be.
+
+A DIRECTION IS NOT REPORTED WITHOUT A SIZE
+------------------------------------------
+The share of gauges moving one way is well determined even when the amount is
+nil. Mean flow between v2 and the v3 sample differs by 0.02% -- yet 80% of
+gauges fall on the low side, because a distribution packed against 1.0 still has
+a side. Below NEGLIGIBLE the share is suppressed and the row says so.
 
 "IMPROVED" IS NOT "WENT UP"
 ---------------------------

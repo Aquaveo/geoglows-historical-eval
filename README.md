@@ -195,8 +195,46 @@ neither script needs the other to have run.
 
 ## Comparing several model runs
 
-Every model gets scored separately and viewed separately. Nothing is shared between runs
-except the gauges they are scored against.
+Two ways. **`compare.py` builds one page answering "what changed"**; serving both runs on two
+ports lets you look at each in full. Score each into its own `--outdir` either way, or the
+second overwrites the first.
+
+### One page showing what changed
+
+```bash
+python compare.py --a outputs_v2 --b outputs_v3 --vpu 714
+```
+
+Writes `vpu714_compare.html` — self-contained, opens in any browser, no server. `--a` is the
+baseline and `--b` the new thing; the page reads "B compared with A" throughout, so swapping
+them inverts every colour.
+
+Five sections:
+
+| | |
+|---|---|
+| **What the two runs look like** | each run's own output — mean flow, variability, 2-year flood level — before any question of skill. Usually the section that explains everything else |
+| **By group** | every grouping × every metric, median *and* mean for both runs, with the share of gauges that improved |
+| **Decision verdicts** | a transition matrix per decision: how many gauges moved which way |
+| **Where each run wins** | map coloured by which run scored closer to the optimum, per metric or per decision |
+| **Gauges that moved most** | the tails, labelled as tails |
+
+Three things it does deliberately:
+
+**Refuses two runs scored over different windows**, because the difference would be partly the
+years. It prints both windows and the remedy.
+
+**Compares only the intersection**, and says how many gauges each side lost. Two models on
+different hydrofabrics do not score the same gauges — if the ones a model lacks are the hard
+ones, comparing the two populations flatters it for a reason unrelated to the model. Gauges in
+only one run get their own colour on the map rather than vanishing.
+
+**Reads "improved" as closer to the optimum, never as larger.** PBIAS is better near zero, FAR
+near zero, alpha/beta/gamma near one — so a plain subtraction would call −40% → −60% an
+improvement. It also suppresses the direction of a change too small to have one: a 0.02% shift
+still has 80% of gauges on one side of it, and reporting that reads as a finding.
+
+### Or serve each run in full
 
 **Score each one into its own `--outdir`**, or the second overwrites the first:
 
@@ -263,6 +301,7 @@ python build_webapp.py --vpu 714 --metrics outputs_v7/vpu714_metrics.parquet --o
 | | |
 |---|---|
 | `kge_map.py` | **the only place a metric is calculated.** Its module docstring defines every one |
+| `compare.py` | builds one page showing what changed between two scored runs |
 | `build_webapp.py` | inlines the payload into a single shareable HTML file |
 | `serve.py` | local server; adds daily hydrographs, too large to embed |
 | `webapp/explorer.html` | the only frontend, shared by both deployments |
