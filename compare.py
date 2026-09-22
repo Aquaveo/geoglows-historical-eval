@@ -257,6 +257,32 @@ def transition_rows(j: pd.DataFrame) -> list[dict]:
     return out
 
 
+def decision_winners(j: pd.DataFrame) -> dict:
+    """Which run reached the better verdict, per decision.
+
+    Verdict codes are ordered worst-to-best, so "better" is simply the higher
+    code. A gauge the run could not judge (-1) is not a worse verdict, it is no
+    verdict -- so a pair where either side is -1 is reported as unscored rather
+    than counted as a win for whichever side managed one.
+    """
+    out = {}
+    for key, name, labels in DECISION_SPECS:
+        ca, cb = key + "_a", key + "_b"
+        if ca not in j.columns or cb not in j.columns:
+            continue
+        va, vb = j[ca], j[cb]
+        ok = va.notna() & vb.notna() & (va >= 0) & (vb >= 0)
+        code = pd.Series(-1, index=j.index, dtype="int8")
+        code[ok & (va > vb)] = 1
+        code[ok & (vb > va)] = 2
+        code[ok & (va == vb)] = 0
+        out["D_" + key] = {"name": "Decision: " + name, "code": code.tolist(),
+                           "a": int((code == 1).sum()), "b": int((code == 2).sum()),
+                           "eq": int((code == 0).sum()),
+                           "only": int((code == -1).sum()), "tol": 0.0}
+    return out
+
+
 def winners(j: pd.DataFrame, equal_frac: float = 0.02) -> dict:
     """Per gauge and per metric, which run sat closer to the optimum.
 
@@ -519,12 +545,12 @@ same observations, same days. "About equal" is a band, since a difference of
 1e-9 always has a sign and colouring it would be noise.</p>
 <div class="key">
   <span><span class="sw" style="background:#2a78d6"></span>{la} better</span>
-  <span><span class="sw" style="background:#c85200"></span>{lb} better</span>
+  <span><span class="sw" style="background:#7b3fa0"></span>{lb} better</span>
   <span><span class="sw" style="background:#9aa5b8"></span>about equal</span>
-  <span><span class="sw" style="background:#d9c34a"></span>scored by only one run</span>
+  <span><span class="sw" style="background:#c9a227"></span>scored by only one run</span>
 </div>
-<p style="margin:8px 0 10px"><label>Metric
-<select id="mapmetric"></select></label>
+<p style="margin:8px 0 10px"><label style="font-weight:650">Colour by
+<select id="mapmetric" style="font-weight:600"></select></label>
 <span id="mapcount" class="note" style="margin-left:10px"></span></p>
 <div id="mapwrap"><svg id="mapsvg" role="img"
   aria-label="gauges coloured by which run performed better"></svg></div>
@@ -533,7 +559,12 @@ are not compared anywhere else on this page &mdash; they are drawn because a
 comparison most easily misleads by quietly omitting them.</p>
 <script>
 const MP = {json.dumps(mp, separators=(",", ":"))};
-const COL = {{"1":"#2a78d6","2":"#c85200","0":"#9aa5b8","-1":"#d9c34a"}};
+// Blue against PURPLE, not against orange or red. The two runs are two things,
+// not a good one and a bad one -- an orange/red arm reads as failure whichever
+// run it lands on. Purple is far enough from blue in hue to separate cleanly and
+// carries no verdict; it is also the one hue explorer.html already established
+// as distinguishable from both arms of its diverging ramp under protanopia.
+const COL = {{"1":"#2a78d6","2":"#7b3fa0","0":"#9aa5b8","-1":"#c9a227"}};
 const svg = document.getElementById("mapsvg");
 const sel = document.getElementById("mapmetric");
 Object.keys(MP.meta).forEach(k => {{
@@ -634,6 +665,7 @@ def main() -> None:
     trans = transition_rows(j)
     top = movers(j, "kge_2012", 1.0)
     win = winners(j)
+    win.update(decision_winners(j))
     mp = map_payload(a, b, j, win, args.vpu)
 
     out = args.out or os.path.join(
