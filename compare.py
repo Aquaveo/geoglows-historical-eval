@@ -223,10 +223,25 @@ def metric_rows(j: pd.DataFrame, groups: list[tuple[str, str]]) -> list[dict]:
                 if len(pair) < MIN_GROUP:
                     continue
                 imp = improved(pair[ca], pair[cb], opt)
+                # Mean as well as median. A change can live entirely in the
+                # tails -- the median stays put while the mean moves -- and that
+                # is a real result, not an artefact. But the mean is fragile for
+                # the unbounded metrics: kge_map.py's own summarize() refuses to
+                # print it for KGE' because one terrible gauge drags it past
+                # every percentile (VPU 714: mean -0.338, median +0.267). So
+                # both are shown, and the row is FLAGGED where they disagree
+                # about the direction of the change, which is the case worth
+                # looking at rather than trusting either number.
+                ma_, mb_ = float(pair[ca].mean()), float(pair[cb].mean())
+                gain_med = abs(float(pair[ca].median()) - opt) - abs(float(pair[cb].median()) - opt)
+                gain_mean = abs(ma_ - opt) - abs(mb_ - opt)
                 out.append({
                     "grouping": gname, "group": bname, "metric": mname,
                     "n": int(len(pair)),
                     "a": float(pair[ca].median()), "b": float(pair[cb].median()),
+                    "am": ma_, "bm": mb_,
+                    "gain_med": gain_med, "gain_mean": gain_mean,
+                    "split": bool(np.sign(gain_med) * np.sign(gain_mean) < 0),
                     "opt": opt, "dec": dec,
                     "share_improved": float(imp.mean()),
                 })
@@ -478,34 +493,49 @@ gamma near one.</p></section>""")
 
     # ---- grouped summary --------------------------------------------------
     parts.append(f"""<section><h2>By group</h2>
-<p class="lede">Median of each run, and the share of gauges where {lb} sits closer
-to the optimum than {la}. Groups with fewer than {MIN_GROUP} paired gauges are
-omitted. This is the best-supported view here: a grouping splits ~{len(j):,}
-gauges into a handful of buckets, so each figure rests on hundreds.</p>""")
+<p class="lede">Median and mean of each run, and the share of gauges where {lb}
+sits closer to the optimum than {la}. Groups with fewer than {MIN_GROUP} paired
+gauges are omitted. This is the best-supported view here: a grouping splits
+~{len(j):,} gauges into a handful of buckets, so each figure rests on hundreds.</p>
+<p class="note" style="margin:-8px 0 12px">Both are shown because a change can
+live entirely in the tails &mdash; the median stays put while the mean moves.
+Treat a moving mean carefully though: the unbounded metrics have no floor, so one
+badly-scored gauge can drag the mean past every percentile. A <b>&#9888;</b>
+marks a row where the mean and the median disagree about which run improved;
+those are the rows to look at rather than to quote.</p>""")
     seen = None
     for grouping in dict.fromkeys(r["grouping"] for r in rows):
         parts.append(f"<h3 style='font-size:13px;margin:16px 0 4px'>{esc(grouping)}</h3>"
                      "<table><thead><tr><th>Group</th><th>Metric</th>"
-                     f"<th class='num'>{la}</th><th class='num'>{lb}</th>"
-                     "<th class='num'>change</th>"
+                     f"<th class='num'>{la} med</th><th class='num'>{lb} med</th>"
+                     "<th class='num'>&Delta; median</th>"
+                     f"<th class='num'>{la} mean</th><th class='num'>{lb} mean</th>"
+                     "<th class='num'>&Delta; mean</th>"
                      "<th class='num'>improved at</th><th></th></tr></thead><tbody>")
         for r in [x for x in rows if x["grouping"] == grouping]:
             if r["group"] != seen:
-                parts.append(f"<tr class='grp'><td colspan='7'>{esc(r['group'])} "
+                parts.append(f"<tr class='grp'><td colspan='10'>{esc(r['group'])} "
                              f"<span style='font-weight:400;color:var(--ink-3)'>"
                              f"n={r['n']:,}</span></td></tr>")
                 seen = r["group"]
-            gain = abs(r["a"] - r["opt"]) - abs(r["b"] - r["opt"])
-            cls = "up" if gain > 0 else ("down" if gain < 0 else "")
-            arrow = "&#9650;" if gain > 0 else ("&#9660;" if gain < 0 else "&ndash;")
+            def cell(gain, dec):
+                cls = "up" if gain > 0 else ("down" if gain < 0 else "")
+                ar = "&#9650;" if gain > 0 else ("&#9660;" if gain < 0 else "&ndash;")
+                return f"<td class='num {cls}'>{ar} {fmt(abs(gain), dec)}</td>"
             sh = r["share_improved"]
             w = max(1, round(sh * 90))
             col = "var(--good)" if sh >= .5 else "var(--bad)"
+            flag = (" <span title='the mean and the median disagree about the "
+                    "direction of this change' style='color:var(--ink-3)'>&#9888;</span>"
+                    if r["split"] else "")
             parts.append(
-                f"<tr><td></td><td>{esc(r['metric'])}</td>"
+                f"<tr><td></td><td>{esc(r['metric'])}{flag}</td>"
                 f"<td class='num runA'>{fmt(r['a'], r['dec'])}</td>"
                 f"<td class='num runB'>{fmt(r['b'], r['dec'])}</td>"
-                f"<td class='num {cls}'>{arrow} {fmt(abs(gain), r['dec'])}</td>"
+                + cell(r["gain_med"], r["dec"]) +
+                f"<td class='num runA'>{fmt(r['am'], r['dec'])}</td>"
+                f"<td class='num runB'>{fmt(r['bm'], r['dec'])}</td>"
+                + cell(r["gain_mean"], r["dec"]) +
                 f"<td class='num'>{100*sh:.0f}%</td>"
                 f"<td><span class='bar' style='width:{w}px;background:{col}'></span></td></tr>")
         parts.append("</tbody></table>")
