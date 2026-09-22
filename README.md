@@ -77,8 +77,18 @@ since the bucket's catalog carries no such column.
 Whichever ran is recorded in `vpu<VPU>_run.json`, with the bucket snapshot date for S3 runs,
 so two sets of results are either comparable or provably not.
 
-**The model** — nothing to prepare. The GEOGLOWS retrospective zarr is public HTTP with no
-credentials, or pass `--model-parquet` to score your own run from a local source.
+**The model** — nothing to prepare. The GEOGLOWS v2 retrospective zarr is public HTTP with no
+credentials. To score something else, name it:
+
+- `--model-parquet` — a local parquet: datetime index, one column per reach id. Sub-daily input
+  is averaged to daily mean.
+- `--model-zarr` — a different retrospective store, `https://` or `s3://` with `--aws-profile`
+  for a private bucket. Zarr **format 2 and format 3** are both read; the time epoch, its unit
+  and the name of the reach-id array are taken from the store rather than assumed, because v2
+  and v3 differ on all three.
+
+The model array is cached and the cache carries a stamp naming what built it, so a cache from a
+different store is rejected rather than reused — two models can never end up mixed in one array.
 
 ## Running it
 
@@ -211,6 +221,31 @@ python serve.py --vpu 714 --metrics outputs_v7/vpu714_metrics.parquet --port 876
 `--label` names the run on its page, its browser tab and the map footer. **Set it on every
 non-default run.** Without it the two tabs are identical apart from their numbers and both
 claim to be GEOGLOWS v2 — which is exactly the confusion a comparison is meant to resolve.
+
+### Comparing v2 against another retrospective
+
+Two things to get right, and both are easy to miss.
+
+**Score them over the years they share.** Measured: v2 covers 1940-01-01 to 2026-09-16 and the
+RFS v3 sample covers 1979-01-01 to 2020-12-31, so v3 sits entirely inside v2 and the overlap is
+the whole of v3 — 42 years.
+
+```bash
+python kge_map.py --vpu 714 --label "GEOGLOWS v2" --outdir outputs_v2 \
+    --start 1979-01-01 --end 2020-12-31
+```
+
+```bash
+python kge_map.py --vpu 714 --label "RFS v3" --outdir outputs_v3 \
+    --model-zarr s3://<bucket>/rfs-v3-sample-data/retrospective/daily.zarr \
+    --aws-profile <profile> --start 1979-01-01 --end 2020-12-31
+```
+
+**Check how many gauges each one actually scored.** The hydrofabrics differ — v2 has 6.8M
+rivers and the v3 sample 4.9M — so a reach id in your catalog may not exist in both. Each run
+prints a count of gauges *absent from the model array*; read it. If the reaches one model lacks
+are systematically the hard ones, comparing medians makes it look better for a reason that has
+nothing to do with the model. The honest comparison is on the gauges present in both.
 
 If instead you want to *send* both runs to someone, build a file per run. `build_webapp.py`
 has no `--outdir`, so point `--metrics` and `--out` into each directory yourself:

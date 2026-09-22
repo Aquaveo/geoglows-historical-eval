@@ -25,13 +25,48 @@ USAGE
     python kge_map.py --vpu <VPU> --label "routing v7" --outdir outputs_v7
     python kge_map.py --vpu <VPU> --warmup-years 1
     python kge_map.py --vpu <VPU> --model-parquet routed.parquet --label "routing v7"
+    python kge_map.py --vpu <VPU> --mode statistic      metrics only, no verdicts
+    python kge_map.py --vpu <VPU> --bias-correct        adds the volume decision
+    python kge_map.py --vpu <VPU> --group-by "Basin,Regulated"
+
+    Scoring a different retrospective, e.g. the RFS v3 sample in a private
+    bucket, over the years the two have in common:
+
+    python kge_map.py --vpu 714 --label "GEOGLOWS v2" --outdir outputs_v2 \
+        --start 1979-01-01 --end 2020-12-31
+    python kge_map.py --vpu 714 --label "RFS v3" --outdir outputs_v3 \
+        --model-zarr s3://.../rfs-v3-sample-data/retrospective/daily.zarr \
+        --aws-profile <profile> --start 1979-01-01 --end 2020-12-31
 
     --vpu         VPU code to evaluate. Defaults to 714
+    --mode        both (default), statistic, or decision. "both" writes the
+                  metric table AND the decision verdicts from one run, over one
+                  window, so the two can never drift apart -- an unset --end
+                  resolves to the retrospective's end date, which advances, so
+                  running the modes on different days used to leave them
+                  covering different periods. It is also cheaper: the gauge CSVs
+                  are read and paired once rather than twice.
+    --bias-correct
+                  Also score the VOLUME decision, which needs the GEOGLOWS
+                  global bias correction. The ONLY part of a run that touches
+                  the network: one request per reach, ~10 minutes for a full VPU
+                  at 12 workers. Off by default so a decision run stays offline.
+    --group-by    Comma-separated catalog columns to offer as groupings on the
+                  summary tab. Named, not guessed. Defaults to the Koppen
+                  column; pass "" for none. A name absent from the catalog is
+                  reported and skipped.
     --model-parquet
                   Score a parquet of modelled discharge instead of the
                   retrospective. Layout: a datetime index and one column per
                   river, named with its reach id. Sub-daily input is averaged to
-                  DAILY MEAN, matching how the daily zarr is built. 
+                  DAILY MEAN, matching how the daily zarr is built.
+    --model-zarr  Score a different retrospective zarr -- an https:// URL, or an
+                  s3:// URL with --aws-profile for a private bucket. Both zarr
+                  FORMAT 2 (the v2 store) and FORMAT 3 (the RFS v3 store) are
+                  read; the time epoch, its unit, and the name of the reach-id
+                  array are taken from the store rather than assumed. The cache
+                  is keyed on the store, so two models can never be mixed in one
+                  array. Set --label to name it.
     --start/--end Restrict the window FETCHED. Default is the
                   whole record.This window names the cache file, and with --warmup-years it
                   is not the window actually scored -- see that flag.
@@ -103,15 +138,56 @@ OUTPUTS WRITTEN
   outputs/vpu<VPU>_metrics.parquet   one row per gauge, every metric below
   outputs/vpu<VPU>_kge_map.png       static map of KGE' at gauge locations
   outputs/vpu<VPU>_run.json          the settings this run used, read back by
-                                     serve.py and build_webapp.py: vpu, label,
-                                     date_start (the EVALUATION start, after any
-                                     warm-up trim), date_end, cache_start (the
-                                     window fetched, which names the cache file),
-                                     warmup_years, min_years, n_gauges, and the
-                                     KGE column name, label and no-skill line.
+                                     serve.py and build_webapp.py: vpu, mode,
+                                     label, date_start (the EVALUATION start,
+                                     after any warm-up trim), date_end,
+                                     cache_start (the window fetched, which
+                                     names the cache file), warmup_years,
+                                     min_years, n_gauges, groups (the catalog
+                                     columns carried as groupings), and the KGE
+                                     column name, label and no-skill line.
   cache/model_q_vpu<VPU>_<start>_<end>.npz    the model array, GAUGED REACHES
                                      ONLY, reused by later runs and read back by
-                                     serve.py and build_webapp.py
+                                     serve.py and build_webapp.py. Carries a
+                                     stamp naming the store or parquet it was
+                                     built from; a cache from a different source
+                                     is rejected rather than reused.
+
+  In decision mode (the default) two more, written over the SAME window so
+  serve.py will show them beside each other:
+
+  outputs/vpu<VPU>_decisions.parquet  one row per gauge, the verdicts below
+  outputs/vpu<VPU>_decisions_run.json the same config, beside that parquet
+
+THE DECISIONS, AND WHAT EACH ONE RESTS ON
+-----------------------------------------
+Decision mode answers questions rather than reporting metrics, and gives each
+gauge a verdict in words. Four are written here; a fifth, "does the model tell
+wet days from dry days", is derived in serve.py from the `spearman` column the
+metric table already carries, so it is not in this parquet.
+
+Each classifies BOTH series against thresholds fitted from its OWN record, so
+volume bias divides out -- which is what makes them answerable at all, given the
+raw model's flood magnitudes are off by more than 2x at ~40% of gauges. Volume
+is the exception: volume IS the absolute number, which is why it is scored on
+the bias-corrected series.
+
+  hs_*   severe low flow   HydroSOS category 1 (driest 10% of each calendar
+                           month). Verdict from the catch rate on severe months;
+                           RED is a per-gauge exact binomial test against luck.
+  fl_*   floods            floods above each series' own 2-year level,
+                           declustered, matched within +/-3 days. CSI. POOR is
+                           the same per-gauge luck test.
+  vol_*  volume            PBIAS of the bias-corrected series. Bands are the
+                           published streamflow ratings of Moriasi et al.
+                           (2007) -- the only decision here not using a
+                           threshold chosen for this project.
+  tr_*   wetter or drier   Mann-Kendall trend sign on annual mean flow, both
+                           series over the identical window.
+
+Every provisional number, what it costs, and what was measured before choosing
+it is in DECISION_MODE.md. The worst band of each decision differs in how much
+it rests on evidence rather than judgement; that file says which is which.
 
 
 
