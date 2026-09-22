@@ -361,6 +361,52 @@ def movers(j: pd.DataFrame, mkey: str, opt: float, n: int = 12) -> dict:
     return {"better": fmt(top), "worse": fmt(bot)}
 
 
+# What each run's OUTPUT looks like, before any question of skill. These are
+# properties of the model alone -- its typical flow, how variable it is, how big
+# its floods are -- so a systematic difference between two runs shows up here
+# even when every skill metric is ambiguous about it. The observed column is the
+# same in both runs by construction and is the reference both are read against.
+CHARACTER = [
+    ("mean_sim", "Mean flow", "mean_obs", "m3/s", 1),
+    ("sd_sim", "Day-to-day variability (sd)", "sd_obs", "m3/s", 1),
+    ("t2_sim", "2-year flood level", "t2_obs", "m3/s", 1),
+    ("alpha", "Variability vs gauge (alpha)", None, "x", 2),
+    ("beta", "Volume vs gauge (beta)", None, "x", 2),
+    ("gamma", "Shape vs gauge (gamma)", None, "x", 2),
+]
+
+
+def character_rows(j: pd.DataFrame) -> list[dict]:
+    """Median of each run's own output, and the ratio between them."""
+    out = []
+    for key, name, obs_key, unit, dec in CHARACTER:
+        ca, cb = key + "_a", key + "_b"
+        if ca not in j.columns or cb not in j.columns:
+            continue
+        pair = j[[ca, cb]].replace([np.inf, -np.inf], np.nan).dropna()
+        if pair.empty:
+            continue
+        va, vb = float(pair[ca].median()), float(pair[cb].median())
+        obs = None
+        if obs_key and obs_key + "_a" in j.columns:
+            o = j[obs_key + "_a"].replace([np.inf, -np.inf], np.nan).dropna()
+            obs = float(o.median()) if len(o) else None
+        # Per-gauge ratio, not a ratio of the medians: it says whether the shift
+        # is systematic across gauges or driven by a few, which is exactly the
+        # distinction that matters here.
+        r = (pair[cb] / pair[ca]).replace([np.inf, -np.inf], np.nan).dropna()
+        r = r[r > 0]
+        out.append({
+            "name": name, "unit": unit, "dec": dec, "n": int(len(pair)),
+            "a": va, "b": vb, "obs": obs,
+            "ratio": float(r.median()) if len(r) else float("nan"),
+            "r25": float(r.quantile(.25)) if len(r) else float("nan"),
+            "r75": float(r.quantile(.75)) if len(r) else float("nan"),
+            "down": float((r < 1).mean()) if len(r) else float("nan"),
+        })
+    return out
+
+
 def map_payload(a: dict, b: dict, j: pd.DataFrame, win: dict, vpu: int) -> dict:
     """Points for the map: every gauge either run scored, with a code per metric.
 
@@ -465,7 +511,8 @@ def fmt(v, dec: int) -> str:
 
 
 def render(a: dict, b: dict, j: pd.DataFrame, rows: list[dict],
-           trans: list[dict], top: dict, mp: dict | None = None) -> str:
+           trans: list[dict], top: dict, mp: dict | None = None,
+           char: list[dict] | None = None) -> str:
     la, lb = esc(a["label"]), esc(b["label"])
     win = f"{a['cfg'].get('date_start','?')} .. {a['cfg'].get('date_end','?')}"
     parts = [f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -490,6 +537,42 @@ same days, only the model differs.</p>
 <p class="note">Improvement always means <i>closer to the metric's optimum</i>,
 never simply larger — PBIAS is better near zero, FAR near zero, alpha, beta and
 gamma near one.</p></section>""")
+
+    # ---- what the two runs look like --------------------------------------
+    if char:
+        parts.append(f"""<section><h2>What the two runs look like</h2>
+<p class="lede">Properties of the model output itself, before any question of
+skill &mdash; how much water it produces, how variable it is, how large its
+floods are. A systematic difference between two runs shows up here plainly, where
+the skill metrics can be ambiguous about it. The gauge column is identical in
+both runs by construction and is what each is read against.</p>
+<table><thead><tr><th>Property</th><th class="num">Gauge</th>
+<th class="num">{la}</th><th class="num">{lb}</th>
+<th class="num">{lb} &divide; {la}</th><th class="num">lower at</th>
+<th></th></tr></thead><tbody>""")
+        for c in char:
+            rat = c["ratio"]
+            far = np.isfinite(rat) and abs(rat - 1) > 0.10
+            share = c["down"]
+            note = ""
+            if np.isfinite(share) and (share > 0.95 or share < 0.05):
+                note = ("<span title='the same direction at essentially every "
+                        "gauge, so this is systematic rather than a few outliers'"
+                        " style='color:var(--ink-3)'>&#9679; systematic</span>")
+            parts.append(
+                f"<tr><td>{esc(c['name'])}"
+                f"<span class='note' style='margin-left:6px'>{esc(c['unit'])}</span></td>"
+                f"<td class='num runA'>{'—' if c['obs'] is None else fmt(c['obs'], c['dec'])}</td>"
+                f"<td class='num'>{fmt(c['a'], c['dec'])}</td>"
+                f"<td class='num'>{fmt(c['b'], c['dec'])}</td>"
+                f"<td class='num'><b>{fmt(rat, 2)}</b></td>"
+                f"<td class='num'>{'—' if not np.isfinite(share) else f'{100*share:.0f}%'}</td>"
+                f"<td>{note}</td></tr>")
+        parts.append("""</tbody></table>
+<p class="note">The ratio is taken per gauge and then summarised, not computed
+from the two medians &mdash; so "lower at 100%" means every single gauge moved the
+same way, which is a very different finding from a median that happens to shift.</p>
+</section>""")
 
     # ---- grouped summary --------------------------------------------------
     parts.append(f"""<section><h2>By group</h2>
@@ -613,14 +696,24 @@ const PY = v => H - (v - LY0) / (LY1 - LY0) * H;
 function draw() {{
   const k = sel.value, code = MP.codes[k];
   let s = `<rect width="${{W}}" height="${{H}}" fill="none"/>`;
-  for (const layer of ["world","countries","states","coast","lakes"]) {{
-    const paths = MP.base[layer] || [];
-    const stroke = layer === "lakes" ? "#c6d4e6" : "#b9c6d8";
-    for (const line of paths) {{
+  // Layers carry different weights so the eye can place itself: national
+  // borders and coastline read first, internal boundaries sit behind them.
+  // Everything was previously one near-invisible grey on a near-identical
+  // background, which is why the outlines could not be seen at all.
+  const LAYERS = [
+    ["world",     "#93a6bd", 0.5],
+    ["states",    "#9fb0c6", 0.6],
+    ["lakes",     "#8aa6c6", 0.8],
+    ["coast",     "#5f7591", 1.0],
+    ["countries", "#46586f", 1.3],
+  ];
+  for (const [layer, stroke, wdt] of LAYERS) {{
+    for (const line of (MP.base[layer] || [])) {{
       let d = "";
       for (let i=0;i<line.length;i++) d += (i?"L":"M") + PX(line[i][0]).toFixed(1)
         + " " + PY(line[i][1]).toFixed(1);
-      s += `<path d="${{d}}" fill="none" stroke="${{stroke}}" stroke-width="0.7"/>`;
+      s += `<path d="${{d}}" fill="none" stroke="${{stroke}}" stroke-width="${{wdt}}"`
+         + ` stroke-linejoin="round" stroke-linecap="round"/>`;
     }}
   }}
   // Draw "about equal" and "only one run" first so a win is never hidden under them.
@@ -694,6 +787,7 @@ def main() -> None:
     rows = metric_rows(j, groups)
     trans = transition_rows(j)
     top = movers(j, "kge_2012", 1.0)
+    char = character_rows(j)
     win = winners(j)
     win.update(decision_winners(j))
     mp = map_payload(a, b, j, win, args.vpu)
@@ -703,7 +797,7 @@ def main() -> None:
         f"vpu{args.vpu}_compare.html")
     print(f"[4/4] writing {out}")
     with open(out, "w", encoding="utf-8") as fh:
-        fh.write(render(a, b, j, rows, trans, top, mp))
+        fh.write(render(a, b, j, rows, trans, top, mp, char))
     print(f"\nwrote {out}")
     if trans:
         for t in trans:
