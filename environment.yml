@@ -49,9 +49,15 @@ dependencies:
   # which is the default when no local gauge directory is present.
   - s3fs>=2024.2
 
-  # serve.py queries the retrospective per reach through this package.
-  # kge_map.py does not need it -- that one reads the zarr directly.
+  # serve.py queries the retrospective per reach through this package, and
+  # kge_map.py calls geoglows.analyze.gumbel1 and geoglows.bias so the return
+  # levels and the bias correction cannot drift from RFS.
   - geoglows>=2.2
+  # `import geoglows` pulls in its plotting stack, which imports pytz -- so this
+  # is needed even though nothing here plots with geoglows. It is not declared
+  # by the package itself, and without it every run dies at the first gumbel1
+  # call with ModuleNotFoundError: No module named 'pytz'.
+  - pytz
 
   # file formats
   - pyarrow>=15     # parquet (metrics table, GEOGLOWS model table)

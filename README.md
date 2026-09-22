@@ -156,12 +156,6 @@ Reaches where the published SFDC table holds a zero get no corrected series and 
 That share varies a lot by region — **4% to 34%** across the VPUs measured — and it is a gap in
 the published correction data, not a problem with your gauges.
 
-If you run the correction yourself rather than through `kge_map.py`, expect
-`RuntimeWarning: invalid value encountered in divide` from `geoglows/bias.py`, once per reach
-and month with a zero scalar. It is that same condition and it is harmless. `kge_map.py`
-silences it around that call only, detects the affected reaches and reports them as unusable,
-rather than letting thousands of warning lines bury the output.
-
 What each decision asks, what it compares and where its bands come from is in
 [DECISION_MODE.md](DECISION_MODE.md), along with every provisional number and what it costs.
 
