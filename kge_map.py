@@ -2427,12 +2427,28 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
             if mode in ("decision", "both"):
                 st.update(hydrosos_stats(both))
                 st.update(trend_stats(both))
-                # Whole-record thresholds, as contingency_stats uses, so the
-                # 2-year level is one number throughout the file.
+                # PAIRED-DAY thresholds. Deliberately NOT the whole-record fit
+                # contingency_stats uses: the model has no gaps, so its whole
+                # record spans every year in the window while the paired set
+                # spans only years the gauge reported -- fitting on the whole
+                # record puts the model's threshold on years this comparison
+                # never scores. Measured on VPU 714, that moves the model's
+                # 2-year level at 44% of gauges (p05 0.83, p95 1.18 against the
+                # paired fit) while leaving the gauge's untouched at 100%.
+                #
+                # This also matches decision 1, which takes the model/gauge
+                # overlap as its reference window for the same reason.
+                #
+                # The cost: t2 here no longer equals the published GEOGLOWS
+                # return period, which is what KNOWN_ISSUES P wanted. That is
+                # the right trade for a DECISION -- the question is whether the
+                # two series agree on the days being compared, not whether the
+                # threshold matches what RFS prints. contingency_stats keeps the
+                # whole-record fit and is unchanged.
                 st.update(flood_stats(
                     both,
-                    return_level(obs.reindex(model.index).dropna(), FLOOD_RP),
-                    return_level(sim.dropna(), FLOOD_RP)))
+                    return_level(both["obs"], FLOOD_RP),
+                    return_level(both["sim"], FLOOD_RP)))
                 # Volume is the one decision scored on the CORRECTED series;
                 # the raw model is 66% unsatisfactory on these bands.
                 if corrections is not None:
