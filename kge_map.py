@@ -2033,8 +2033,25 @@ def volume_stats(sim_cor: pd.Series, sim_raw: pd.Series,
 # FLOOD_SEP must be at least 2*FLOOD_WINDOW+1, or two neighbouring observed
 # floods have overlapping match windows and one modelled flood can be credited
 # to both. At 7 and 3 the windows exactly touch.
+# Measured on VPU 714 with declustering held fixed so only the tolerance varied:
+#
+#     window    POD     CSI    chance   skill above chance
+#     same day  0.125   0.071  0.003    0.122
+#     +/-1 d    0.227   0.130  0.009    0.220
+#     +/-3 d    0.270   0.160  0.021    0.254
+#     +/-5 d    0.297   0.176  0.033    0.273
+#
+# Same-day to +/-1 nearly doubles POD, and it is a real recovery rather than luck
+# leaking in: chance moves only 0.003 to 0.009. The model is routinely a day off
+# and same-day matching scores that as total failure.
+#
+# NOTE that +/-1 sits on the STEEP part of that curve. +/-2, +/-3 and +/-4 are
+# within 2-3% of each other, so a choice in that range does not depend on the
+# exact number; +/-1 does -- moving to +/-2 shifts CSI by 0.02. That is the cost
+# of the stricter test, which is what it buys: "within a day" is a far stronger
+# claim than "within three".
 FLOOD_RP = 2                  # return period; CSI falls by half at 5yr and again by 10yr
-FLOOD_WINDOW = 3              # a match counts within +/- this many days
+FLOOD_WINDOW = 2              # a match counts within +/- this many days
 FLOOD_SEP = 7                 # days two exceedances must be apart to be separate floods
 FLOOD_ALPHA = 0.05            # one-sided; above this p-value the gauge is red
 # 0.50 is the point where hits equal misses plus false alarms -- the forecast
@@ -2044,14 +2061,24 @@ FLOOD_ALPHA = 0.05            # one-sided; above this p-value the gauge is red
 # band is deliberate -- it is a fixed reference that will not drift when a
 # different model run is scored, unlike a cut taken from this run's spread.
 FLOOD_STRONG = 0.50
-FLOOD_MIDDLE = 0.19           # pooled median over those 747 gauges; descriptive only
+# There is deliberately NO band between "beats luck" and FLOOD_STRONG. One was
+# tried, set at the pooled median CSI, and dropped: it meant only "above the
+# middle of this population", which is a percentile wearing the word "good". It
+# said nothing about whether the model was any use at that gauge, it expired
+# every time a parameter moved -- the paired-day fit and the window change each
+# invalidated it -- and being a median of one VPU it would have meant a different
+# CSI in every region, quietly breaking comparisons between them.
+#
+# Three bands remain and every boundary is a claim that can be defended in a
+# sentence. The cost is a flat map: ~92% of gauges sit in the middle band. That
+# flatness is the honest result, not a defect to design around -- almost every
+# gauge beats luck and almost none reaches the deterministic limit.
 
-FLOOD_GREY, FLOOD_POOR, FLOOD_WEAK, FLOOD_GOOD, FLOOD_STRONG_N = -1, 0, 1, 2, 3
+FLOOD_GREY, FLOOD_POOR, FLOOD_WEAK, FLOOD_STRONG_N = -1, 0, 1, 2
 FLOOD_LABELS = {-1: "not enough floods to judge",
                 0: "cannot be shown to beat luck",
-                1: "beats luck, below the median gauge",
-                2: "above the median gauge",
-                3: "as many hits as misses and false alarms combined"}
+                1: "beats luck",
+                2: "as many hits as misses and false alarms combined"}
 
 
 def return_level(series: pd.Series, T: float) -> float:
@@ -2137,8 +2164,6 @@ def flood_stats(both: pd.DataFrame, t_obs: float, t_sim: float) -> dict:
         out["fl_verdict"] = FLOOD_POOR
     elif csi >= FLOOD_STRONG:
         out["fl_verdict"] = FLOOD_STRONG_N
-    elif csi >= FLOOD_MIDDLE:
-        out["fl_verdict"] = FLOOD_GOOD
     else:
         out["fl_verdict"] = FLOOD_WEAK
     return out
@@ -2671,10 +2696,10 @@ def summarize_decision(m: pd.DataFrame) -> None:
               f"\n{'='*62}")
         print(f"  floods above each series' own {FLOOD_RP}-year level, matched within "
               f"+/-{FLOOD_WINDOW} days, {FLOOD_SEP}-day declustering")
-        print(f"  strong CSI >= {FLOOD_STRONG:.2f}, good >= {FLOOD_MIDDLE:.2f}, "
+        print(f"  strong CSI >= {FLOOD_STRONG:.2f} (hits = misses + false alarms), "
               f"poor = luck not ruled out at p <= {FLOOD_ALPHA:.2f}\n")
         f = m["fl_verdict"].fillna(FLOOD_GREY).astype(int)
-        for code in (FLOOD_STRONG_N, FLOOD_GOOD, FLOOD_WEAK, FLOOD_POOR, FLOOD_GREY):
+        for code in (FLOOD_STRONG_N, FLOOD_WEAK, FLOOD_POOR, FLOOD_GREY):
             n = int((f == code).sum())
             print(f"    {FLOOD_LABELS[code]:48s} {n:6d}  {100*n/len(f):5.1f}%")
         c = m.loc[f != FLOOD_GREY, "fl_csi"].dropna()

@@ -100,7 +100,7 @@ DECISION_SPECS = [
     ("hs_verdict", "Severe low flow",
      {-1: "Can't say", 0: "No", 1: "Weakly", 2: "Mostly", 3: "Yes"}),
     ("fl_verdict", "Floods",
-     {-1: "Can't say", 0: "Poor", 1: "Weak", 2: "Good", 3: "Strong"}),
+     {-1: "Can't say", 0: "No", 1: "Beats luck", 2: "Strong"}),
     ("vol_verdict", "Volume of water",
      {-1: "Can't say", 0: "Unsatisfactory", 1: "Satisfactory",
       2: "Good", 3: "Very good"}),

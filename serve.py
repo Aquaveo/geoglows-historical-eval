@@ -42,7 +42,8 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import pandas as pd
 
-from kge_map import (CACHE_DIR, KGE_NO_SKILL, add_gauge_source_args,
+from kge_map import (CACHE_DIR, FLOOD_RP, FLOOD_SEP, FLOOD_WINDOW,
+                     KGE_NO_SKILL, add_gauge_source_args,
                      framing_bbox, load_gauge_series, note_unused_data_dir,
                      source_from_args)
 
@@ -247,6 +248,10 @@ def load_gauges(vpu: int, metrics_path: str) -> dict:
             # Why decision mode is absent, when a decision parquet exists but
             # could not be used. None when there is nothing to explain.
             "dNote": STATE.get("decision_note"),
+            # The flood decision's parameters, so the gauge panel can state them
+            # rather than hard-coding numbers that then drift from the constants.
+            # The window has already been changed twice.
+            "flood": {"window": FLOOD_WINDOW, "rp": FLOOD_RP, "sep": FLOOD_SEP},
             "window": [STATE["cfg"]["date_start"], STATE["cfg"]["date_end"]]}
 
 
