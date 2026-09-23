@@ -2052,6 +2052,26 @@ def volume_stats(sim_cor: pd.Series, sim_raw: pd.Series,
 # claim than "within three".
 FLOOD_RP = 2                  # return period; CSI falls by half at 5yr and again by 10yr
 FLOOD_WINDOW = 2              # a match counts within +/- this many days
+# Measured, window held at +/-2 so only the separation varied. It barely matters:
+#
+#     sep   events   POD     CSI     poor(luck)
+#      5      39     0.256   0.155     6.8%
+#      7      38     0.250   0.152     7.1%
+#     14      36     0.255   0.153     8.1%
+#     45      30     0.250   0.148    10.2%
+#
+# CSI moves 0.007 across a NINEFOLD change in separation, and against 7 the share
+# of gauges shifting by more than 0.05 is 1% at sep 5 and 0% at sep 10 and 14.
+#
+# The gap distribution says why. Time between consecutive exceedance runs at a
+# gauge: p10 8 days, p25 30, MEDIAN 247, p90 1087. Only 8% of gaps are under a
+# week. Past the few days a hydrograph takes to recede there is nothing for the
+# separation to cut through -- the next flood is months away. Going from 7 to 45
+# loses 8 events of 38, and those are the small clustered tail, not the bulk.
+#
+# So 7 is not a tuned number; 5 or 14 would give the same answer. What actually
+# binds is FLOOD_SEP >= 2*FLOOD_WINDOW+1, i.e. >= 5 at the current window. Seven
+# leaves margin and sits in the flat region.
 FLOOD_SEP = 7                 # days two exceedances must be apart to be separate floods
 FLOOD_ALPHA = 0.05            # one-sided; above this p-value the gauge is red
 # 0.50 is the point where hits equal misses plus false alarms -- the forecast
