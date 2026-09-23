@@ -25,13 +25,48 @@ USAGE
     python kge_map.py --vpu <VPU> --label "routing v7" --outdir outputs_v7
     python kge_map.py --vpu <VPU> --warmup-years 1
     python kge_map.py --vpu <VPU> --model-parquet routed.parquet --label "routing v7"
+    python kge_map.py --vpu <VPU> --mode statistic      metrics only, no verdicts
+    python kge_map.py --vpu <VPU> --bias-correct        adds the volume decision
+    python kge_map.py --vpu <VPU> --group-by "Basin,Regulated"
+
+    Scoring a different retrospective, e.g. the RFS v3 sample in a private
+    bucket, over the years the two have in common:
+
+    python kge_map.py --vpu 714 --label "GEOGLOWS v2" --outdir outputs_v2 \
+        --start 1979-01-01 --end 2020-12-31
+    python kge_map.py --vpu 714 --label "RFS v3" --outdir outputs_v3 \
+        --model-zarr s3://.../rfs-v3-sample-data/retrospective/daily.zarr \
+        --aws-profile <profile> --start 1979-01-01 --end 2020-12-31
 
     --vpu         VPU code to evaluate. Defaults to 714
+    --mode        both (default), statistic, or decision. "both" writes the
+                  metric table AND the decision verdicts from one run, over one
+                  window, so the two can never drift apart -- an unset --end
+                  resolves to the retrospective's end date, which advances, so
+                  running the modes on different days used to leave them
+                  covering different periods. It is also cheaper: the gauge CSVs
+                  are read and paired once rather than twice.
+    --bias-correct
+                  Also score the VOLUME decision, which needs the GEOGLOWS
+                  global bias correction. The ONLY part of a run that touches
+                  the network: one request per reach, ~10 minutes for a full VPU
+                  at 12 workers. Off by default so a decision run stays offline.
+    --group-by    Comma-separated catalog columns to offer as groupings on the
+                  summary tab. Named, not guessed. Defaults to the Koppen
+                  column; pass "" for none. A name absent from the catalog is
+                  reported and skipped.
     --model-parquet
                   Score a parquet of modelled discharge instead of the
                   retrospective. Layout: a datetime index and one column per
                   river, named with its reach id. Sub-daily input is averaged to
-                  DAILY MEAN, matching how the daily zarr is built. 
+                  DAILY MEAN, matching how the daily zarr is built.
+    --model-zarr  Score a different retrospective zarr -- an https:// URL, or an
+                  s3:// URL with --aws-profile for a private bucket. Both zarr
+                  FORMAT 2 (the v2 store) and FORMAT 3 (the RFS v3 store) are
+                  read; the time epoch, its unit, and the name of the reach-id
+                  array are taken from the store rather than assumed. The cache
+                  is keyed on the store, so two models can never be mixed in one
+                  array. Set --label to name it.
     --start/--end Restrict the window FETCHED. Default is the
                   whole record.This window names the cache file, and with --warmup-years it
                   is not the window actually scored -- see that flag.
@@ -103,15 +138,56 @@ OUTPUTS WRITTEN
   outputs/vpu<VPU>_metrics.parquet   one row per gauge, every metric below
   outputs/vpu<VPU>_kge_map.png       static map of KGE' at gauge locations
   outputs/vpu<VPU>_run.json          the settings this run used, read back by
-                                     serve.py and build_webapp.py: vpu, label,
-                                     date_start (the EVALUATION start, after any
-                                     warm-up trim), date_end, cache_start (the
-                                     window fetched, which names the cache file),
-                                     warmup_years, min_years, n_gauges, and the
-                                     KGE column name, label and no-skill line.
+                                     serve.py and build_webapp.py: vpu, mode,
+                                     label, date_start (the EVALUATION start,
+                                     after any warm-up trim), date_end,
+                                     cache_start (the window fetched, which
+                                     names the cache file), warmup_years,
+                                     min_years, n_gauges, groups (the catalog
+                                     columns carried as groupings), and the KGE
+                                     column name, label and no-skill line.
   cache/model_q_vpu<VPU>_<start>_<end>.npz    the model array, GAUGED REACHES
                                      ONLY, reused by later runs and read back by
-                                     serve.py and build_webapp.py
+                                     serve.py and build_webapp.py. Carries a
+                                     stamp naming the store or parquet it was
+                                     built from; a cache from a different source
+                                     is rejected rather than reused.
+
+  In decision mode (the default) two more, written over the SAME window so
+  serve.py will show them beside each other:
+
+  outputs/vpu<VPU>_decisions.parquet  one row per gauge, the verdicts below
+  outputs/vpu<VPU>_decisions_run.json the same config, beside that parquet
+
+THE DECISIONS, AND WHAT EACH ONE RESTS ON
+-----------------------------------------
+Decision mode answers questions rather than reporting metrics, and gives each
+gauge a verdict in words. Four are written here; a fifth, "does the model tell
+wet days from dry days", is derived in serve.py from the `spearman` column the
+metric table already carries, so it is not in this parquet.
+
+Each classifies BOTH series against thresholds fitted from its OWN record, so
+volume bias divides out -- which is what makes them answerable at all, given the
+raw model's flood magnitudes are off by more than 2x at ~40% of gauges. Volume
+is the exception: volume IS the absolute number, which is why it is scored on
+the bias-corrected series.
+
+  hs_*   severe low flow   HydroSOS category 1 (driest 10% of each calendar
+                           month). Verdict from the catch rate on severe months;
+                           RED is a per-gauge exact binomial test against luck.
+  fl_*   floods            floods above each series' own 2-year level,
+                           declustered, matched within +/-3 days. CSI. POOR is
+                           the same per-gauge luck test.
+  vol_*  volume            PBIAS of the bias-corrected series. Bands are the
+                           published streamflow ratings of Moriasi et al.
+                           (2007) -- the only decision here not using a
+                           threshold chosen for this project.
+  tr_*   wetter or drier   Mann-Kendall trend sign on annual mean flow, both
+                           series over the identical window.
+
+Every provisional number, what it costs, and what was measured before choosing
+it is in DECISION_MODE.md. The worst band of each decision differs in how much
+it rests on evidence rather than judgement; that file says which is which.
 
 
 
@@ -351,10 +427,66 @@ GAUGE_DATE_TAG = "20251008"
 GAUGE_WORKERS = 12
 
 ZARR_URL = "http://geoglows-v2.s3-us-west-2.amazonaws.com/retrospective/daily.zarr"
+# Credentials for the store above. Empty for the public v2 zarr, which is plain
+# anonymous HTTP. An s3:// URL given with --model-zarr fills this from
+# --aws-profile, because a private bucket cannot be read anonymously.
+ZARR_STORAGE_OPTIONS: dict = {}
+
+
+def use_model_zarr(url: str, profile: str | None = None) -> None:
+    """Point the reader at a different retrospective zarr.
+
+    The cache stamp is f"zarr:{ZARR_URL}", so switching stores automatically
+    invalidates a cache built from the other one -- two models cannot be
+    silently mixed in one array.
+    """
+    global ZARR_URL, ZARR_STORAGE_OPTIONS
+    ZARR_URL = url
+    ZARR_STORAGE_OPTIONS = ({"profile": profile}
+                            if url.startswith("s3://") and profile else {})
+
+
+def zarr_store():
+    """The zarr mapper for whichever store is configured."""
+    import fsspec
+    return fsspec.get_mapper(ZARR_URL, **ZARR_STORAGE_OPTIONS)
 MODEL_TABLE_URL = "http://geoglows-v2.s3-us-west-2.amazonaws.com/tables/v2-model-table.parquet"
 
 # The zarr time axis is "seconds since 1940-01-01", daily steps.
 ZARR_EPOCH = pd.Timestamp("1940-01-01")
+
+
+def zarr_times(z) -> pd.DatetimeIndex:
+    """Decode the time axis from whatever the store declares.
+
+    v2 says "seconds since 1940-01-01" and v3 "hours since 1979-01-01", so the
+    epoch and the unit are both read from the array's own attrs rather than
+    assumed. ZARR_EPOCH remains the fallback for a store carrying no units.
+    """
+    raw = z["time"][:]
+    units = str(dict(z["time"].attrs).get("units", "")).strip()
+    m = re.match(r"(\w+)\s+since\s+(.+)", units)
+    if not m:
+        return pd.DatetimeIndex(ZARR_EPOCH + pd.to_timedelta(raw, unit="s"))
+    unit, epoch = m.group(1).lower(), m.group(2).strip()
+    unit = {"seconds": "s", "second": "s", "hours": "h", "hour": "h",
+            "days": "D", "day": "D", "minutes": "m",
+            "minute": "m"}.get(unit, "s")
+    base = pd.Timestamp(epoch)
+    if base.tzinfo is not None:
+        base = base.tz_convert("UTC").tz_localize(None)
+    return pd.DatetimeIndex(base + pd.to_timedelta(raw, unit=unit))
+
+
+def zarr_river_ids(z) -> np.ndarray:
+    """The reach-id array, whatever the store calls it.
+
+    v2 names it `river_id`, v3 `riverId`.
+    """
+    for name in ("river_id", "riverId", "rivid", "river_ids"):
+        if name in z:
+            return np.asarray(z[name][:])
+    raise KeyError(f"no reach-id array in this zarr; found {list(z.array_keys())}")
 
 # Fetch window for the model array -- and the evaluation window too, unless
 # --warmup-years trims the front of it. None means "everything the model covers",
@@ -928,8 +1060,28 @@ def note_unused_data_dir(args, source) -> None:
               f"      They apply to --gauge-source local.")
 
 
-def build_gauge_table(vpu: int, source) -> pd.DataFrame:
-    """Catalog gauges in `vpu` that have a real reach id, network attrs, and a CSV."""
+# Catalog columns carried through as GROUPINGS on the summary tab. Named, not
+# inferred: sniffing the catalog for "probably categorical" columns would guess
+# wrong on ids and on anything numeric-but-categorical, and this project names
+# its inputs rather than deriving them. The default keeps Koppen working for
+# existing runs with no flag.
+GROUP_DEFAULT = "Koppen Group (as of 2024)"
+
+# Column prefixes that belong to the decision table rather than the metric one.
+# hs_ severe low flow, tr_ wetter or drier, fl_ floods, vol_ volume.
+# wd_ is absent on purpose: it is derived in serve.py from the `spearman`
+# column the metric table already carries, so it is never written here.
+DECISION_PREFIXES = ("hs_", "tr_", "fl_", "vol_")
+
+
+def build_gauge_table(vpu: int, source, groups: list[str] | None = None
+                      ) -> pd.DataFrame:
+    """Catalog gauges in `vpu` that have a real reach id, network attrs, and a CSV.
+
+    `groups` names catalog columns to carry as groupings. Each becomes g0, g1...
+    in the table; run.json records which original column each key came from, so
+    the page can label them without the catalog.
+    """
     print(f"[1/5] building gauge table for VPU {vpu} from {source.describe()}")
 
     cat = source.catalog()
@@ -964,20 +1116,33 @@ def build_gauge_table(vpu: int, source) -> pd.DataFrame:
     keep = [
         "final_river_id", "gauge_id", "fname", "loc", "latitude", "longitude",
         "ISO_A3", "river_name", "strmOrder", "USContArea",
-        # Local runs only -- the bucket catalog has no Koppen equivalent, so an
-        # S3 run carries no such column and compute_metrics() writes None.
-        "Koppen Group (as of 2024)",
     ]
+    # Grouping columns become g0, g1... A name that is not in this catalog is
+    # reported rather than silently dropped -- an S3 run has no Koppen column,
+    # and a typo in --group-by should not look like an empty grouping.
+    wanted = [c for c in (groups or []) if c]
+    gmap = {}
+    for i, col in enumerate(wanted):
+        if col in g.columns:
+            key = f"g{i}"
+            gmap[key] = col
+            g = g.rename(columns={col: key})
+            keep.append(key)
+        else:
+            print(f"      --group-by {col!r}: not a column in this catalog, skipped")
     keep = [c for c in keep if c in g.columns]
-    g = g[keep].rename(columns={"Koppen Group (as of 2024)": "koppen"})
+    g = g[keep]
+    g.attrs["groups"] = gmap
 
     # gauge_id mixes numeric USGS ids with alphanumeric ones (Canadian HYDAT
     # codes, for instance), so pandas infers `object`; force str for a clean
     # parquet schema.
-    for c in ("gauge_id", "koppen", "river_name", "ISO_A3"):
+    for c in ["gauge_id", "river_name", "ISO_A3"] + list(gmap):
         if c in g.columns:
             g[c] = g[c].astype(str)
-    return g.reset_index(drop=True)
+    out = g.reset_index(drop=True)
+    out.attrs["groups"] = gmap
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -991,8 +1156,8 @@ def model_period() -> tuple[str, str]:
     """
     import fsspec
     import zarr
-    z = zarr.open(fsspec.get_mapper(ZARR_URL), mode="r")
-    t = ZARR_EPOCH + pd.to_timedelta(z["time"][:], unit="s")
+    z = zarr.open(zarr_store(), mode="r")
+    t = zarr_times(z)
     return t[0].strftime("%Y-%m-%d"), t[-1].strftime("%Y-%m-%d")
 
 
@@ -1055,9 +1220,9 @@ def fetch_model_q(
 
     print(f"[2/5] reading model discharge from {ZARR_URL}")
     t0 = time.time()
-    z = zarr.open(fsspec.get_mapper(ZARR_URL), mode="r")
+    z = zarr.open(zarr_store(), mode="r")
 
-    all_ids = z["river_id"][:]
+    all_ids = zarr_river_ids(z)
     pos = pd.Series(np.arange(len(all_ids)), index=all_ids)
     idx = pos.reindex(river_ids)
     if idx.isna().any():
@@ -1067,7 +1232,7 @@ def fetch_model_q(
     river_ids = np.asarray(river_ids)[ok.values]
     col_idx = idx[ok].astype(int).values
 
-    times = ZARR_EPOCH + pd.to_timedelta(z["time"][:], unit="s")
+    times = zarr_times(z)
     tmask = (times >= pd.Timestamp(date_start)) & (times <= pd.Timestamp(date_end))
     # Stop if the window misses the model record entirely. np.argmax on an
     # all-False mask returns 0 rather than signalling failure, and so does the
@@ -1584,12 +1749,661 @@ def monthly_stats(both: pd.DataFrame) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Decision mode: HydroSOS low-flow status
+# --------------------------------------------------------------------------- #
+
+# A calendar month is usable if at least this share of its days are present.
+HYDROSOS_MIN_MONTH_PCT = 50.0
+# Every calendar month needs MORE than this many usable instances, or the gauge
+# is dropped: with fewer there are too few values to place a 10th-percentile
+# breakpoint. Strictly greater, so 10 requires 11.
+HYDROSOS_MIN_YEARS_PER_MONTH = 10
+# Rank targets, and the category each one opens. Category 1 is the driest.
+HYDROSOS_TARGET_RANKS = (0.10, 0.25, 0.75, 0.90)
+
+# --- Decision 1 verdict ---------------------------------------------------- #
+# PROVISIONAL. Chosen 2026-09-18; the reasoning, the measured consequences and
+# the objection to the 0.33 cut are in DECISION_MODE.md. Changing a number here
+# changes every verdict, so change it here and nowhere else.
+#
+# Category 1 is the driest 10% of each calendar month by construction, so a
+# model that knows nothing still lands on 10% of the gauge's severe months by
+# luck. RED is not a catch-rate threshold: it is the gauges where that luck
+# cannot be ruled out, tested per gauge because a short record needs a far
+# higher catch rate to prove anything than a long one does.
+VERDICT_BASE_RATE = 0.10      # share of months that are category 1
+VERDICT_ALPHA = 0.05          # one-sided; above this p-value the gauge is red
+VERDICT_GREEN = 0.50          # catches at least half of severe dry months
+VERDICT_GOOD = 0.33           # catches a third to a half
+
+# -1 grey so the value is never null: a gauge with no verdict must still draw on
+# the map rather than being filtered out as missing data.
+VERDICT_GREY, VERDICT_RED, VERDICT_WEAK, VERDICT_GOOD_N, VERDICT_GREEN_N = -1, 0, 1, 2, 3
+# "within what luck produces", not "no better than luck": the test is one-sided
+# and cannot assert equality with luck. Gauges measurably WORSE than luck exist
+# but are 0.0-0.3% of gauges across five VPUs, so they are not split out.
+VERDICT_LABELS = {-1: "not enough data to judge",
+                  0: "no - hits within what luck would produce",
+                  1: "weak - beats luck, catches under a third",
+                  2: "good - catches a third to a half",
+                  3: "yes - catches at least half"}
+
+
+def hydrosos_verdict(catch, p_luck) -> int:
+    """Traffic-light verdict for the severe-dry decision.
+
+    `p_luck` is the probability a model knowing nothing would match this many
+    of the gauge's severe months or more. Above VERDICT_ALPHA the gauge is red:
+    not "it scored badly" but "we cannot show this beats guessing".
+    """
+    if catch is None or p_luck is None:
+        return VERDICT_GREY
+    try:
+        catch = float(catch); p_luck = float(p_luck)
+    except (TypeError, ValueError):
+        return VERDICT_GREY
+    if not (np.isfinite(catch) and np.isfinite(p_luck)):
+        return VERDICT_GREY
+    if p_luck > VERDICT_ALPHA:
+        return VERDICT_RED
+    if catch >= VERDICT_GREEN:
+        return VERDICT_GREEN_N
+    if catch >= VERDICT_GOOD:
+        return VERDICT_GOOD_N
+    return VERDICT_WEAK
+
+
+def hydrosos_categories(daily: pd.Series, usable: pd.Series) -> pd.Series:
+    """HydroSOS 1-5 status per calendar month, following `statuscalc.py`.
+
+    `daily` is a daily discharge series; `usable` is a boolean indexed by
+    (year, month) saying which months clear the completeness rule. The
+    reference window is the whole of `daily` -- the caller decides what that
+    window is.
+
+        1  <= p10      2  <= p25      3  <= p75      4  <= p90      5  > p90
+
+    Monthly means are divided by the long-term average of their calendar month
+    before ranking. That is a constant within a month, so it cannot reorder
+    values or change a category; it is kept because the published method emits
+    the normalised value and the thresholds alongside the category.
+
+    Breakpoints are Weibull plotting positions, rank/(n+1), linearly
+    interpolated between the ranks bracketing each target and clamped to the
+    end values when a target falls outside the observed range.
+
+    Returns a Series of Int64 categories indexed by (year, month), NA where the
+    month was unusable.
+    """
+    key = [daily.index.year, daily.index.month]
+    mean_flow = daily.groupby(key).mean()
+    mean_flow.index.names = ["year", "month"]
+    mean_flow = mean_flow.where(usable.reindex(mean_flow.index).fillna(False))
+
+    months = mean_flow.index.get_level_values("month")
+    lta = mean_flow.groupby(months).mean()
+    pct = mean_flow / lta.reindex(months).to_numpy() * 100.0
+
+    cat = pd.Series(pd.NA, index=mean_flow.index, dtype="Int64")
+    for m in range(1, 13):
+        vals = pct[months == m].dropna()
+        if vals.empty:
+            continue
+        # rank/(n+1), then read the target ranks off the (rank, value) curve.
+        ranks = vals.rank().to_numpy() / (len(vals) + 1)
+        order = np.argsort(ranks, kind="stable")
+        r_sorted = ranks[order]
+        v_sorted = vals.to_numpy()[order]
+        edges = [float(np.interp(t, r_sorted, v_sorted))
+                 for t in HYDROSOS_TARGET_RANKS]
+        # np.searchsorted with side="left" gives 1..5 against the four edges,
+        # matching `<= p10 -> 1` ... `> p90 -> 5`.
+        assigned = np.searchsorted(edges, vals.to_numpy(), side="left") + 1
+        cat.loc[vals.index] = assigned.astype("int64")
+    return cat
+
+
+def _contingency(flag_s: np.ndarray, flag_o: np.ndarray, prefix: str) -> dict:
+    """2x2 scores for one boolean band, named `<prefix>_*`.
+
+    Same quantities as contingency_stats(); ets carries the chance correction,
+    ar = (a+b)(a+c)/n, so its sign is the better-than-chance test.
+    """
+    a = int(np.sum(flag_o & flag_s))
+    b = int(np.sum(~flag_o & flag_s))
+    c = int(np.sum(flag_o & ~flag_s))
+    d = int(np.sum(~flag_o & ~flag_s))
+    n = a + b + c + d
+    out = {f"{prefix}_hits": a, f"{prefix}_false_alarms": b,
+           f"{prefix}_misses": c, f"{prefix}_correct_neg": d}
+    if a + c > 0:
+        out[f"{prefix}_pod"] = a / (a + c)
+        out[f"{prefix}_freq_bias"] = (a + b) / (a + c)
+    if a + b > 0:
+        out[f"{prefix}_far"] = b / (a + b)
+    if a + b + c > 0:
+        out[f"{prefix}_csi"] = a / (a + b + c)
+        ar = (a + b) * (a + c) / n
+        if (a + b + c - ar) != 0:
+            out[f"{prefix}_ets"] = (a - ar) / (a + b + c - ar)
+    return out
+
+
+def _kappa(cs: np.ndarray, co: np.ndarray, linear: bool) -> float | None:
+    """Cohen's kappa over categories 1-5; linear disagreement weights optional.
+
+    Chance uses the OBSERVED marginals, which is standard kappa. Because each
+    series is binned against its own record the marginals sit near
+    10/15/50/15/10 by construction, so p_e should land near 0.315; using the
+    observed ones rather than assuming that lets a deviation show up instead of
+    being hidden.
+    """
+    k = 5
+    obs = np.zeros((k, k), dtype="float64")
+    for i, j in zip(co - 1, cs - 1):
+        obs[i, j] += 1
+    n = obs.sum()
+    if n == 0:
+        return None
+    # Agreement weights: 1 on the diagonal, 0 at maximum disagreement. Identity
+    # for the unweighted case, so p_o is the plain match rate.
+    idx = np.arange(k)
+    w = (1.0 - np.abs(idx[:, None] - idx[None, :]) / (k - 1)) if linear \
+        else np.eye(k)
+    exp = np.outer(obs.sum(axis=1), obs.sum(axis=0)) / n
+    p_o = float((w * obs).sum() / n)
+    p_e = float((w * exp).sum() / n)
+    if p_e >= 1.0:
+        return None
+    return (p_o - p_e) / (1.0 - p_e)
+
+
+# --- Decision: is the annual volume of water representative? ---------------- #
+# The ONLY decision here whose bands come from published literature. Moriasi et
+# al. (2007), Table 4, Transactions of the ASABE 50(3):885-900 -- the standard
+# performance ratings for streamflow in hydrologic model evaluation. Every other
+# decision in this file has bands that were chosen; these were not.
+#
+# PBIAS = 100 * sum(sim - obs) / sum(obs), computed on daily paired values.
+# Measured on VPU 714: the time step does not matter (daily 10.45%, monthly
+# 10.37%, within 1.5 percentage points at every gauge, because PBIAS is a ratio
+# of sums) and taking the median of each year's bias instead moves only 1.7% of
+# gauges across a band. The standard statistic is used so the published bands
+# stay valid.
+#
+# Scored on the GLOBALLY BIAS-CORRECTED series, not the raw model: the raw model
+# is 66% unsatisfactory and correction takes that to 27%. Correction is what
+# makes this question answerable at all.
+VOLUME_VERY_GOOD = 10.0       # |PBIAS| below this
+VOLUME_GOOD = 15.0
+VOLUME_SATISFACTORY = 25.0    # above this is unsatisfactory
+
+VOLUME_GREY, VOLUME_BAD, VOLUME_OK, VOLUME_GOOD_N, VOLUME_BEST = -1, 0, 1, 2, 3
+VOLUME_LABELS = {-1: "no corrected series available",
+                 0: "unsatisfactory - |PBIAS| over 25%",
+                 1: "satisfactory - 15 to 25%",
+                 2: "good - 10 to 15%",
+                 3: "very good - under 10%"}
+
+
+def volume_verdict(pbias) -> int:
+    """Moriasi et al. (2007) streamflow performance rating from PBIAS."""
+    try:
+        p = abs(float(pbias))
+    except (TypeError, ValueError):
+        return VOLUME_GREY
+    if not np.isfinite(p):
+        return VOLUME_GREY
+    if p < VOLUME_VERY_GOOD:
+        return VOLUME_BEST
+    if p < VOLUME_GOOD:
+        return VOLUME_GOOD_N
+    if p < VOLUME_SATISFACTORY:
+        return VOLUME_OK
+    return VOLUME_BAD
+
+
+def corrected_series(river_id: int, sim: pd.Series) -> pd.Series | None:
+    """GEOGLOWS global bias correction for one reach, or None if unusable.
+
+    geoglows.bias.sfdc_bias_correction divides the simulation by a scalar read
+    from the published SFDC table. Where that table holds a zero the result is
+    inf, which is a defect in the published correction rather than in the model
+    or the gauge -- and it is not rare: measured across five VPUs the unusable
+    share runs from 4% (VPU 209) to 34% (VPU 208).
+
+    Note the function returns ONE column, overwriting the input, despite a
+    docstring promising two ("Simulated flow, Bias Corrected Simulation flow").
+    """
+    try:
+        from geoglows.bias import sfdc_bias_correction
+        # Silenced NARROWLY, around this call only. A zero scalar makes numpy
+        # emit "invalid value encountered in divide" per reach and per month,
+        # which buries the real output in thousands of lines and reads like a
+        # crash. The condition is not ignored -- it is exactly what the
+        # isfinite check below catches, and those reaches are reported as
+        # unusable rather than silently dropped.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out = sfdc_bias_correction(sim.to_frame(name="sim"), int(river_id))
+    except Exception:
+        return None
+    s = out[out.columns[-1]]
+    if not np.isfinite(s.to_numpy()).all():
+        return None
+    return s
+
+
+def volume_stats(sim_cor: pd.Series, sim_raw: pd.Series,
+                 obs: pd.Series) -> dict:
+    """PBIAS of the bias-corrected series against the gauge, and its rating.
+
+      vol_pbias      100 * sum(sim - obs) / sum(obs), corrected, on paired days
+      vol_pbias_raw  the same for the UNCORRECTED model
+      vol_n_days     paired days both were computed over
+      vol_verdict    -1 grey, 0 unsatisfactory, 1 satisfactory, 2 good, 3 very good
+
+    The raw figure is computed here rather than taken from `pbias_pct` in the
+    metric table so the two rest on the IDENTICAL day set. Otherwise a gauge
+    could appear to have been improved or worsened by the correction when the
+    difference was really which days each was measured over.
+    """
+    both = pd.concat([sim_cor.rename("cor"), sim_raw.rename("raw"),
+                      obs.rename("obs")], axis=1, join="inner").dropna()
+    if len(both) < 365:
+        return {}
+    tot = float(both["obs"].sum())
+    if not (tot > 0):
+        return {}
+    pb = lambda c: 100.0 * (float(both[c].sum()) - tot) / tot
+    p = pb("cor")
+    return {"vol_pbias": p, "vol_pbias_raw": pb("raw"),
+            "vol_n_days": int(len(both)), "vol_verdict": volume_verdict(p)}
+
+
+# --- Decision: does the model show a flood when the river floods? ----------- #
+# Each series is thresholded at ITS OWN 2-year level, so flood MAGNITUDE divides
+# out -- this establishes whether a flood shows up and when, not whether it was
+# the right size. The magnitude question was measured and abandoned: proving the
+# model's flood levels per gauge needs ~145 years of record and none has 100.
+#
+# Scored on declustered EVENTS, not days: a flood spans ~2.9 days, so daily
+# counts would triple the sample and break independence.
+#
+# FLOOD_SEP must be at least 2*FLOOD_WINDOW+1, or two neighbouring observed
+# floods have overlapping match windows and one modelled flood can be credited
+# to both. At 7 and 3 the windows exactly touch.
+# Measured on VPU 714 with declustering held fixed so only the tolerance varied:
+#
+#     window    POD     CSI    chance   skill above chance
+#     same day  0.125   0.071  0.003    0.122
+#     +/-1 d    0.227   0.130  0.009    0.220
+#     +/-3 d    0.270   0.160  0.021    0.254
+#     +/-5 d    0.297   0.176  0.033    0.273
+#
+# Same-day to +/-1 nearly doubles POD, and it is a real recovery rather than luck
+# leaking in: chance moves only 0.003 to 0.009. The model is routinely a day off
+# and same-day matching scores that as total failure.
+#
+# NOTE that +/-1 sits on the STEEP part of that curve. +/-2, +/-3 and +/-4 are
+# within 2-3% of each other, so a choice in that range does not depend on the
+# exact number; +/-1 does -- moving to +/-2 shifts CSI by 0.02. That is the cost
+# of the stricter test, which is what it buys: "within a day" is a far stronger
+# claim than "within three".
+FLOOD_RP = 2                  # return period; CSI falls by half at 5yr and again by 10yr
+FLOOD_WINDOW = 2              # a match counts within +/- this many days
+FLOOD_SEP = 7                 # days two exceedances must be apart to be separate floods
+FLOOD_ALPHA = 0.05            # one-sided; above this p-value the gauge is red
+# 0.50 is the point where hits equal misses plus false alarms -- the forecast
+# gets as much right as it gets wrong. It is arithmetic, not a published band:
+# CSI has no standard skill classification, which was searched for and does not
+# exist. Measured on 747 gauges across 5 VPUs, NO gauge reaches it. The empty
+# band is deliberate -- it is a fixed reference that will not drift when a
+# different model run is scored, unlike a cut taken from this run's spread.
+FLOOD_STRONG = 0.50
+# There is deliberately NO band between "beats luck" and FLOOD_STRONG. One was
+# tried, set at the pooled median CSI, and dropped: it meant only "above the
+# middle of this population", which is a percentile wearing the word "good". It
+# said nothing about whether the model was any use at that gauge, it expired
+# every time a parameter moved -- the paired-day fit and the window change each
+# invalidated it -- and being a median of one VPU it would have meant a different
+# CSI in every region, quietly breaking comparisons between them.
+#
+# Three bands remain and every boundary is a claim that can be defended in a
+# sentence. The cost is a flat map: ~92% of gauges sit in the middle band. That
+# flatness is the honest result, not a defect to design around -- almost every
+# gauge beats luck and almost none reaches the deterministic limit.
+
+FLOOD_GREY, FLOOD_POOR, FLOOD_WEAK, FLOOD_STRONG_N = -1, 0, 1, 2
+FLOOD_LABELS = {-1: "not enough floods to judge",
+                0: "cannot be shown to beat luck",
+                1: "beats luck",
+                2: "as many hits as misses and false alarms combined"}
+
+
+def return_level(series: pd.Series, T: float) -> float:
+    """T-year level from a Gumbel MoM fit to calendar-year maxima.
+
+    Same fit contingency_stats() uses, called through geoglows.analyze.gumbel1
+    so it cannot drift from RFS. Annual maxima come from the series' WHOLE
+    record in the window, not the paired days -- see KNOWN_ISSUES P.
+    """
+    ams = series.groupby(series.index.year).max().dropna()
+    if len(ams) < MIN_YEARS_FOR_RETURN:
+        return float("nan")
+    from geoglows.analyze import gumbel1
+    return float(gumbel1(T, float(ams.mean()), float(ams.std(ddof=0))))
+
+
+def _flood_events(flag: np.ndarray, sep: int = FLOOD_SEP) -> np.ndarray:
+    """Start index of each separate flood: runs of exceedance, declustered."""
+    starts = np.flatnonzero(np.diff(np.r_[0, flag.astype(np.int8)]) == 1)
+    if len(starts) == 0:
+        return starts
+    keep = [starts[0]]
+    for s in starts[1:]:
+        if s - keep[-1] >= sep:
+            keep.append(s)
+    return np.array(keep)
+
+
+def _flood_matched(starts: np.ndarray, other: np.ndarray,
+                   w: int = FLOOD_WINDOW) -> int:
+    """How many of `starts` have the other series flagged within +/- w days."""
+    n = len(other)
+    return sum(1 for s in starts
+               if other[max(0, s - w):min(n, s + w + 1)].any())
+
+
+def flood_stats(both: pd.DataFrame, t_obs: float, t_sim: float) -> dict:
+    """Does a modelled flood turn up when the gauge floods?
+
+      fl_n_obs     floods the gauge recorded
+      fl_n_sim     floods the model produced
+      fl_hits      gauge floods with a modelled flood within +/- 3 days
+      fl_false     modelled floods with no observed counterpart
+      fl_csi       hits / (hits + misses + false alarms)
+      fl_p_luck    chance of this many hits or more from a model with no skill
+      fl_verdict   -1 grey, 0 poor, 1 weak, 2 good, 3 strong
+
+    CSI rather than the plain hit rate because the hit rate can be inflated by
+    flooding more often, and CSI cannot: it carries the false alarms in its
+    denominator. On VPU 714 the two rank gauges at 0.96 correlation, but at the
+    1.4% of gauges that over-flood the hit rate says 0.24 where CSI says 0.11.
+    """
+    out = {}
+    if not (np.isfinite(t_obs) and np.isfinite(t_sim) and t_obs > 0 and t_sim > 0):
+        return out
+    fo = (both["obs"] >= t_obs).to_numpy()
+    fs = (both["sim"] >= t_sim).to_numpy()
+    eo, es = _flood_events(fo), _flood_events(fs)
+    out["fl_n_obs"], out["fl_n_sim"] = int(len(eo)), int(len(es))
+    if len(eo) < 5 or len(es) == 0:
+        return out                      # too few floods to say anything
+
+    hits = _flood_matched(eo, fs)
+    hits_sim = _flood_matched(es, fo)
+    false_alarms = len(es) - hits_sim
+    misses = len(eo) - hits
+    out["fl_hits"], out["fl_false"] = int(hits), int(false_alarms)
+    den = hits + false_alarms + misses
+    if den == 0:
+        return out
+    csi = hits / den
+    out["fl_csi"] = float(csi)
+
+    # A model with no skill still lands in some windows. Its per-flood chance is
+    # 1-(1-p)^(2w+1) where p is how often it floods -- so a model that floods
+    # more has a HIGHER bar, which is the point of testing per gauge.
+    p = float(fs.mean())
+    chance = 1.0 - (1.0 - p) ** (2 * FLOOD_WINDOW + 1)
+    from scipy.stats import binom
+    out["fl_p_luck"] = float(binom.sf(hits - 1, len(eo), chance))
+
+    if out["fl_p_luck"] > FLOOD_ALPHA:
+        out["fl_verdict"] = FLOOD_POOR
+    elif csi >= FLOOD_STRONG:
+        out["fl_verdict"] = FLOOD_STRONG_N
+    else:
+        out["fl_verdict"] = FLOOD_WEAK
+    return out
+
+
+# --- Decision: does the model tell wet days from dry days? ------------------ #
+# Scored from the `spearman` column the metric table already carries -- daily
+# rank correlation between modelled and observed flow -- so this needs no extra
+# computation and no re-run. serve.py derives the verdict at display time,
+# which is why changing a band here takes effect on the next page load.
+#
+# PROVISIONAL BANDS, chosen from the VPU 714 distribution (p10 0.32, median
+# 0.57, p90 0.71) and not anchored to anything. See DECISION_MODE.md for the
+# alternative that was measured but not taken: a per-gauge benchmark of what
+# the seasonal cycle ALONE scores, which the model beats at 65% of gauges and
+# which would make the bottom band mean something derived rather than chosen.
+#
+# The user was shown that seasonality drives roughly 0.506 of the median 0.569
+# and accepted it: for someone asking when a river runs high or low, getting
+# the seasonal timing right is part of the answer.
+WETDRY_STRONG = 0.70
+WETDRY_GOOD = 0.50
+WETDRY_WEAK = 0.30
+
+WETDRY_GREY, WETDRY_POOR, WETDRY_WEAK_N, WETDRY_GOOD_N, WETDRY_STRONG_N = -1, 0, 1, 2, 3
+WETDRY_LABELS = {-1: "no value",
+                 0: "poor - under 0.30",
+                 1: "weak - 0.30 to 0.50",
+                 2: "good - 0.50 to 0.70",
+                 3: "strong - 0.70 and above"}
+
+
+def wetdry_verdict(rho) -> int:
+    """Band the daily rank correlation between modelled and observed flow."""
+    try:
+        rho = float(rho)
+    except (TypeError, ValueError):
+        return WETDRY_GREY
+    if not np.isfinite(rho):
+        return WETDRY_GREY
+    if rho >= WETDRY_STRONG:
+        return WETDRY_STRONG_N
+    if rho >= WETDRY_GOOD:
+        return WETDRY_GOOD_N
+    if rho >= WETDRY_WEAK:
+        return WETDRY_WEAK_N
+    return WETDRY_POOR
+
+
+# --- Decision 3: is the river getting wetter or drier? ---------------------- #
+# PROVISIONAL, and three choices here are inherited from the analysis the
+# four states were measured on rather than separately agreed. All are one-line
+# changes; see DECISION_MODE.md.
+#
+#   * the variable is ANNUAL MEAN flow -- "wetter or drier" in the volume sense.
+#     Trend in annual MAXIMUM (are floods worsening) or annual MINIMUM (are
+#     droughts deepening) are different questions with different answers.
+#   * a year counts only with TREND_MIN_DAYS paired days, so a part-year cannot
+#     masquerade as a dry or wet one. Measured on VPU 714, raising this from 300
+#     to 364 moved kappa 0.040 -> 0.055 and left the marginals unchanged.
+#   * plain Mann-Kendall OVER-REJECTS on autocorrelated series, so both series
+#     likely find more trends than are real. Prewhitening is NOT implemented.
+TREND_MIN_DAYS = 300          # paired days a year needs to be used
+TREND_MIN_YEARS = 30          # usable years a gauge needs for any verdict
+TREND_ALPHA = 0.05            # Mann-Kendall significance
+
+TREND_GREY, TREND_INVENTS, TREND_MISSES, TREND_NONE, TREND_AGREES = -1, 0, 1, 2, 3
+TREND_LABELS = {-1: "not enough data to judge",
+                0: "invents a trend the gauge does not show",
+                1: "misses a trend the gauge does show",
+                2: "neither finds a trend",
+                3: "agrees on the direction"}
+
+
+def _mk_sign(y: np.ndarray) -> int:
+    """Mann-Kendall direction: +1 wetting, -1 drying, 0 no significant trend."""
+    from scipy.stats import kendalltau
+    tau, p = kendalltau(np.arange(len(y)), y)
+    if not np.isfinite(p) or p > TREND_ALPHA:
+        return 0
+    return 1 if tau > 0 else -1
+
+
+def trend_stats(both: pd.DataFrame) -> dict:
+    """Do model and gauge agree on whether the river is changing?
+
+    Annual means are taken from the PAIRED days only, so both series describe
+    the same days of the same years and a difference cannot come from one of
+    them covering a period the other does not.
+
+      tr_n_years   usable years
+      tr_obs       gauge direction   +1 wetting, 0 none, -1 drying
+      tr_sim       model direction
+      tr_verdict   -1 grey, 0 invents, 1 misses, 2 neither, 3 agrees
+
+    "Neither finds a trend" is NOT a pass. It is the model being silent where
+    there was nothing to detect, and on VPU 714 it is half of all gauges -- a
+    plain match/no-match split would score those as successes and read 55%
+    correct off what is mostly mutual silence.
+    """
+    g = both.groupby(both.index.year)
+    size = g.size()
+    keep = size[size >= TREND_MIN_DAYS].index
+    out = {"tr_n_years": int(len(keep))}
+    if len(keep) < TREND_MIN_YEARS:
+        return out
+    so = _mk_sign(g["obs"].mean().loc[keep].to_numpy())
+    ss = _mk_sign(g["sim"].mean().loc[keep].to_numpy())
+    out["tr_obs"], out["tr_sim"] = so, ss
+    if so == 0 and ss == 0:
+        v = TREND_NONE
+    elif so != 0 and so == ss:
+        v = TREND_AGREES
+    elif so != 0 and ss == 0:
+        v = TREND_MISSES
+    else:
+        # Model asserts a trend the gauge does not support: either the gauge is
+        # flat, or the two point opposite ways. Both are the model speaking out
+        # of turn, so they share a state.
+        v = TREND_INVENTS
+    out["tr_verdict"] = v
+    return out
+
+
+def hydrosos_stats(both: pd.DataFrame) -> dict:
+    """Agreement between modelled and observed HydroSOS low-flow status.
+
+    Both series are categorised independently but identically, over the paired
+    record -- so the reference window is the model/gauge overlap and both are
+    ranked on exactly the same months. Monthly means come from paired days, so
+    a day missing from either series is absent from both monthly means.
+
+      hs_n_months        months compared
+      hs_min_n_month     usable instances of the scarcest calendar month; the
+                         binding constraint on every breakpoint
+      hs_agree           share of months in the same category
+      hs_kappa           linearly weighted kappa over the 5 categories
+      hs_kappa_unw       unweighted kappa: exact category match only
+
+      hs_dry_*           2x2 scores for "dry or worse", category <= 2
+      hs_xdry_*          2x2 scores for "extremely dry", category == 1
+
+    A gauge whose scarcest calendar month has HYDROSOS_MIN_YEARS_PER_MONTH or
+    fewer usable instances returns hs_min_n_month alone and is dropped by the
+    caller.
+    """
+    idx = both.index
+    key = [idx.year, idx.month]
+    present = both["sim"].groupby(key).size()
+    present.index.names = ["year", "month"]
+    days_in_month = pd.Series(
+        [pd.Period(year=y, month=m, freq="M").days_in_month
+         for y, m in present.index],
+        index=present.index, dtype="float64")
+    usable = (present / days_in_month * 100.0) >= HYDROSOS_MIN_MONTH_PCT
+
+    per_month = usable[usable].groupby(
+        usable[usable].index.get_level_values("month")).size()
+    # A calendar month absent altogether counts as zero, not as missing.
+    min_n = int(per_month.reindex(range(1, 13)).fillna(0).min())
+    out = {"hs_min_n_month": min_n}
+    if min_n <= HYDROSOS_MIN_YEARS_PER_MONTH:
+        return out
+
+    cat_s = hydrosos_categories(both["sim"], usable)
+    cat_o = hydrosos_categories(both["obs"], usable)
+    paired = pd.concat([cat_s.rename("s"), cat_o.rename("o")],
+                       axis=1, join="inner").dropna()
+    out["hs_n_months"] = int(len(paired))
+    if paired.empty:
+        return out
+
+    cs = paired["s"].to_numpy("int64")
+    co = paired["o"].to_numpy("int64")
+    out["hs_agree"] = float(np.mean(cs == co))
+    kw = _kappa(cs, co, linear=True)
+    ku = _kappa(cs, co, linear=False)
+    if kw is not None:
+        out["hs_kappa"] = kw
+    if ku is not None:
+        out["hs_kappa_unw"] = ku
+    out.update(_contingency(cs <= 2, co <= 2, "hs_dry"))
+    out.update(_contingency(cs == 1, co == 1, "hs_xdry"))
+
+    # Could this gauge's hit count have come from luck? Exact binomial, not the
+    # normal approximation: a gauge with 12 severe months expects 1.2 hits by
+    # chance, where the normal approximation is unreliable and too lenient --
+    # it asks for a catch rate of 0.24 there against the exact test's 0.33.
+    k = out.get("hs_xdry_hits", 0) + out.get("hs_xdry_misses", 0)
+    a = out.get("hs_xdry_hits", 0)
+    out["hs_xdry_n_events"] = int(k)
+    if k > 0:
+        from scipy.stats import binom
+        out["hs_xdry_p_luck"] = float(binom.sf(a - 1, k, VERDICT_BASE_RATE))
+        out["hs_verdict"] = hydrosos_verdict(out.get("hs_xdry_pod"),
+                                             out["hs_xdry_p_luck"])
+    return out
+
+
+def fetch_corrections(river_ids, model: pd.DataFrame) -> dict:
+    """Bias-corrected series for every reach, fetched in parallel.
+
+    Network-bound, one request per reach, so this is threaded rather than run
+    inside the gauge loop: measured 0.54s a reach serially against 0.21s at
+    twelve workers, i.e. ~23 minutes against ~9 for a full VPU.
+    """
+    ids = [int(r) for r in river_ids if int(r) in model.columns]
+    # Said up front, with an estimate: this is the one step that goes to the
+    # network, it is minutes not seconds, and it prints nothing while it runs.
+    # Without a warning it looks like the script has hung.
+    secs = len(ids) * 0.21
+    eta = (f"{secs:.0f} seconds" if secs < 90 else
+           f"{secs/60:.0f} minutes")
+    print(f"      bias correction: {len(ids):,} reaches over the network, "
+          f"{GAUGE_WORKERS} workers")
+    print(f"      roughly {eta}, and it prints nothing until it finishes")
+    t0 = time.time()
+    out, bad = {}, 0
+    with ThreadPoolExecutor(max_workers=GAUGE_WORKERS) as pool:
+        for rid, s in zip(ids, pool.map(
+                lambda r: corrected_series(r, model[r]), ids)):
+            if s is None:
+                bad += 1
+            else:
+                out[rid] = s
+    print(f"      corrected {len(out):,} in {(time.time()-t0)/60:.1f} min; "
+          f"{bad:,} unusable because the published SFDC table holds a zero "
+          f"for them -- a gap in the correction data, not in your gauges")
+    return out
+
+
 def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
-                    min_years: float, source=None) -> pd.DataFrame:
+                    min_years: float, source=None,
+                    mode: str = "statistic",
+                    corrections: dict | None = None) -> pd.DataFrame:
     """Pair each gauge against its reach and compute the metric table."""
     # The threshold counts PAIRED DAYS, not elapsed years: a gauge reporting
     # sparsely for thirty years can still fail it. Print the day count so the
     # filter cannot be misread as a span. See KNOWN_ISSUES section Q.
+    group_keys = [c for c in gauges.columns if re.fullmatch(r"g\d+", c)]
     min_days = int(round(min_years * 365.25))
     print(f"[3/5] pairing {len(gauges)} gauges "
           f"(minimum {min_days:,} paired days = {min_years}y)")
@@ -1604,7 +2418,7 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
         series = pool.map(load_gauge_series, gauges["loc"],
                           [source] * len(gauges))
 
-        rows, n_stage, n_short, n_empty = [], 0, 0, 0
+        rows, n_stage, n_short, n_empty, n_sparse = [], 0, 0, 0, 0
         for i, (g, obs) in enumerate(
                 zip(gauges.itertuples(index=False), series), start=1):
             if i % 500 == 0:
@@ -1624,22 +2438,68 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
                 n_short += 1
                 continue
 
-            st = pair_stats(both["sim"].to_numpy("float64"),
-                            both["obs"].to_numpy("float64"))
-            st.update(skill_scores(both))
-            # Thresholds from each series' whole record in the window; the
-            # contingency counts below still use the paired days only.
-            # sim is already indexed on model.index; only obs needs clipping to it.
-            st.update(contingency_stats(both, sim.dropna(),
-                                        obs.reindex(model.index).dropna()))
-            st.update(monthly_stats(both))
+            st = {"n_pairs": len(both)}
+            if mode in ("statistic", "both"):
+                st.update(pair_stats(both["sim"].to_numpy("float64"),
+                                     both["obs"].to_numpy("float64")))
+                st.update(skill_scores(both))
+                # Thresholds from each series' whole record in the window; the
+                # contingency counts below still use the paired days only.
+                # sim is already indexed on model.index; only obs needs clipping to it.
+                st.update(contingency_stats(both, sim.dropna(),
+                                            obs.reindex(model.index).dropna()))
+                st.update(monthly_stats(both))
+            if mode in ("decision", "both"):
+                st.update(hydrosos_stats(both))
+                st.update(trend_stats(both))
+                # PAIRED-DAY thresholds. Deliberately NOT the whole-record fit
+                # contingency_stats uses: the model has no gaps, so its whole
+                # record spans every year in the window while the paired set
+                # spans only years the gauge reported -- fitting on the whole
+                # record puts the model's threshold on years this comparison
+                # never scores. Measured on VPU 714, that moves the model's
+                # 2-year level at 44% of gauges (p05 0.83, p95 1.18 against the
+                # paired fit) while leaving the gauge's untouched at 100%.
+                #
+                # This also matches decision 1, which takes the model/gauge
+                # overlap as its reference window for the same reason.
+                #
+                # The cost: t2 here no longer equals the published GEOGLOWS
+                # return period, which is what KNOWN_ISSUES P wanted. That is
+                # the right trade for a DECISION -- the question is whether the
+                # two series agree on the days being compared, not whether the
+                # threshold matches what RFS prints. contingency_stats keeps the
+                # whole-record fit and is unchanged.
+                st.update(flood_stats(
+                    both,
+                    return_level(both["obs"], FLOOD_RP),
+                    return_level(both["sim"], FLOOD_RP)))
+                # Volume is the one decision scored on the CORRECTED series;
+                # the raw model is 66% unsatisfactory on these bands.
+                if corrections is not None:
+                    cs = corrections.get(int(g.final_river_id))
+                    if cs is not None:
+                        st.update(volume_stats(cs, sim, obs))
+                # A gauge answering neither decision is dropped only when the
+                # decisions are all that is being written. Under "both" it is
+                # kept -- it still has statistics -- and filtered out when the
+                # decision table is split off. The two decisions ask different
+                # things of the record, so a gauge can answer one and not the
+                # other, and dropping it for failing either would silently
+                # shrink the other's map.
+                if (mode == "decision" and "hs_verdict" not in st
+                        and "tr_verdict" not in st and "fl_verdict" not in st):
+                    n_sparse += 1
+                    continue
             # Every gauge attribute that reaches the parquet is listed here. A
             # column kept by build_gauge_table() but missing from this call is
             # silently dropped, so the two lists have to be changed together.
+            for _k in group_keys:
+                st[_k] = getattr(g, _k, None)
             st.update(final_river_id=g.final_river_id, gauge_id=g.gauge_id,
                       fname=g.fname, latitude=g.latitude, longitude=g.longitude,
                       strmOrder=g.strmOrder, USContArea=g.USContArea,
-                      koppen=getattr(g, "koppen", None), ISO_A3=g.ISO_A3,
+                      ISO_A3=g.ISO_A3,
                       river_name=getattr(g, "river_name", None),
                       first_day=both.index.min(), last_day=both.index.max())
             rows.append(st)
@@ -1650,7 +2510,10 @@ def compute_metrics(gauges: pd.DataFrame, model: pd.DataFrame,
 
     print(f"      kept {len(rows)}  |  skipped: {n_stage} stage-only, "
           f"{n_short} under {min_days:,} paired days, {n_empty} absent from the "
-          f"model array")
+          f"model array"
+          + (f", {n_sparse} without more than {HYDROSOS_MIN_YEARS_PER_MONTH} "
+             f"usable instances of every calendar month" if mode == "decision"
+             else ""))
 
     m = pd.DataFrame(rows)
     if m.empty:
@@ -1774,6 +2637,100 @@ def plot_kge_map(m: pd.DataFrame, vpu: int, out_png: str,
 
 # --------------------------------------------------------------------------- #
 
+def summarize_decision(m: pd.DataFrame) -> None:
+    """Verdict counts for the severe-dry decision.
+
+    Percentages are of every gauge that reached the decision run, so grey is
+    counted rather than hidden -- it is a third of the map on some VPUs and
+    quoting shares of the scored gauges alone would understate it.
+    """
+    print(f"\n{'='*62}\nDoes the model identify severe low flow?  {len(m)} gauges"
+          f"\n{'='*62}")
+    print(f"  green at catch >= {VERDICT_GREEN:.2f}, good >= {VERDICT_GOOD:.2f}, "
+          f"red = luck not ruled out at p <= {VERDICT_ALPHA:.2f}\n")
+    if "hs_verdict" not in m.columns:
+        print("  no verdicts in this table")
+        return
+    v = m["hs_verdict"].fillna(VERDICT_GREY).astype(int)
+    for code in (VERDICT_GREEN_N, VERDICT_GOOD_N, VERDICT_WEAK,
+                 VERDICT_RED, VERDICT_GREY):
+        n = int((v == code).sum())
+        print(f"    {VERDICT_LABELS[code]:42s} {n:6d}  {100*n/len(v):5.1f}%")
+    scored = m.loc[v != VERDICT_GREY, "hs_xdry_pod"].dropna()
+    if not scored.empty:
+        print(f"\n  catch rate where scored: median {scored.median():.2f}, "
+              f"p05 {scored.quantile(.05):.2f}, p95 {scored.quantile(.95):.2f}")
+    if "hs_xdry_n_events" in m.columns:
+        k = m["hs_xdry_n_events"].dropna()
+        k = k[k > 0]
+        if not k.empty:
+            print(f"  severe months judged on: median {k.median():.0f}, "
+                  f"min {k.min():.0f}, max {k.max():.0f}")
+
+    if "vol_verdict" in m.columns:
+        print(f"\n{'='*62}\nIs the annual volume of water representative?"
+              f"\n{'='*62}")
+        print("  PBIAS of the GEOGLOWS bias-corrected series against the gauge")
+        print(f"  bands from Moriasi et al. (2007) Table 4: very good <{VOLUME_VERY_GOOD:.0f}%,"
+              f" good <{VOLUME_GOOD:.0f}%, satisfactory <{VOLUME_SATISFACTORY:.0f}%\n")
+        v = m["vol_verdict"].fillna(VOLUME_GREY).astype(int)
+        for code in (VOLUME_BEST, VOLUME_GOOD_N, VOLUME_OK, VOLUME_BAD, VOLUME_GREY):
+            n = int((v == code).sum())
+            print(f"    {VOLUME_LABELS[code]:42s} {n:6d}  {100*n/len(v):5.1f}%")
+        pb = m.loc[v != VOLUME_GREY, "vol_pbias"].dropna()
+        raw = m.loc[v != VOLUME_GREY, "vol_pbias_raw"].dropna()
+        if not pb.empty:
+            print(f"\n  PBIAS where scored: median {pb.median():+.1f}%, "
+                  f"median absolute {pb.abs().median():.1f}%")
+        if not raw.empty:
+            print(f"  before correction : median {raw.median():+.1f}%, "
+                  f"median absolute {raw.abs().median():.1f}%")
+            j = m.loc[v != VOLUME_GREY, ["vol_pbias", "vol_pbias_raw"]].dropna()
+            if len(j):
+                better = (j.vol_pbias.abs() < j.vol_pbias_raw.abs()).mean()
+                print(f"  correction improved the volume at {100*better:.0f}% "
+                      f"of scored gauges")
+
+    if "fl_verdict" in m.columns:
+        print(f"\n{'='*62}\nDoes the model show a flood when the river floods?"
+              f"\n{'='*62}")
+        print(f"  floods above each series' own {FLOOD_RP}-year level, matched within "
+              f"+/-{FLOOD_WINDOW} days, {FLOOD_SEP}-day declustering")
+        print(f"  strong CSI >= {FLOOD_STRONG:.2f} (hits = misses + false alarms), "
+              f"poor = luck not ruled out at p <= {FLOOD_ALPHA:.2f}\n")
+        f = m["fl_verdict"].fillna(FLOOD_GREY).astype(int)
+        for code in (FLOOD_STRONG_N, FLOOD_WEAK, FLOOD_POOR, FLOOD_GREY):
+            n = int((f == code).sum())
+            print(f"    {FLOOD_LABELS[code]:48s} {n:6d}  {100*n/len(f):5.1f}%")
+        c = m.loc[f != FLOOD_GREY, "fl_csi"].dropna()
+        if not c.empty:
+            print(f"\n  CSI where scored: median {c.median():.3f}, "
+                  f"p25 {c.quantile(.25):.3f}, p75 {c.quantile(.75):.3f}")
+        if "fl_n_obs" in m.columns:
+            k = m.loc[f != FLOOD_GREY, "fl_n_obs"].dropna()
+            if not k.empty:
+                print(f"  floods judged on: median {k.median():.0f}, "
+                      f"min {k.min():.0f}, max {k.max():.0f}")
+
+    if "tr_verdict" not in m.columns:
+        return
+    print(f"\n{'='*62}\nIs the river getting wetter or drier?  annual mean flow"
+          f"\n{'='*62}")
+    print(f"  Mann-Kendall p < {TREND_ALPHA}, years needing {TREND_MIN_DAYS} paired "
+          f"days, {TREND_MIN_YEARS} years minimum\n")
+    t = m["tr_verdict"].fillna(TREND_GREY).astype(int)
+    for code in (TREND_AGREES, TREND_NONE, TREND_MISSES, TREND_INVENTS, TREND_GREY):
+        n = int((t == code).sum())
+        print(f"    {TREND_LABELS[code]:42s} {n:6d}  {100*n/len(t):5.1f}%")
+    # The number that matters: "neither finds a trend" is not the model being
+    # right, so the honest score is conditional on there being something to find.
+    real = m[(m.get("tr_obs").notna()) & (m["tr_obs"] != 0)] if "tr_obs" in m else m.iloc[:0]
+    if len(real):
+        hit = int((real["tr_sim"] == real["tr_obs"]).sum())
+        print(f"\n  where the gauge shows a real trend ({len(real)} gauges), "
+              f"the model agrees at {hit} of them ({100*hit/len(real):.1f}%)")
+
+
 def summarize(m: pd.DataFrame) -> None:
     col = KGE_COL
     v = m[col].dropna()
@@ -1799,10 +2756,37 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--vpu", type=int, default=714)
+    ap.add_argument("--mode", choices=("both", "statistic", "decision"),
+                    default="both",
+                    help="both (default): write the metric table AND the "
+                         "decision verdicts from one run, over one window, so "
+                         "they cannot drift apart. statistic: the metric table "
+                         "only (KGE', NSE, contingency, monthly). decision: "
+                         "the verdicts only, which must be scored over the same "
+                         "window as the metrics they will be shown beside.")
     ap.add_argument("--start", default=DATE_START)
     ap.add_argument("--end", default=DATE_END)
     ap.add_argument("--min-years", type=float, default=1.0,
                     help="minimum overlap between model and gauge")
+    ap.add_argument("--model-zarr", default=None,
+                    help="score a different retrospective zarr instead of the "
+                         "public GEOGLOWS v2 one -- an https:// URL, or an "
+                         "s3:// URL with --aws-profile for a private bucket. "
+                         "The cache is keyed on the store, so two zarrs can "
+                         "never be mixed in one array. Set --label to name it.")
+    ap.add_argument("--group-by", default=GROUP_DEFAULT,
+                    help="comma-separated catalog columns to offer as "
+                         "groupings on the summary tab. Named explicitly, not "
+                         "guessed. Defaults to the Koppen column; pass an empty "
+                         "string for none. A name absent from your catalog is "
+                         "reported and skipped.")
+    ap.add_argument("--bias-correct", action="store_true",
+                    help="also score the VOLUME decision, which needs the "
+                         "GEOGLOWS global bias correction. This is the only "
+                         "part of a decision run that uses the network: one "
+                         "request per reach, about 9 minutes for a full VPU at "
+                         "12 workers. Off by default so a decision run stays "
+                         "offline.")
     ap.add_argument("--refresh", action="store_true",
                     help="re-read the zarr instead of using the local cache")
     ap.add_argument("--outdir", default=OUTPUT_DIR)
@@ -1824,6 +2808,14 @@ def main() -> None:
     # and neither a wrong --data-dir nor a missing credential should cost that.
     # Constructing the source is itself the check -- the local backend stats its
     # inputs, the S3 one lists the bucket.
+    if args.model_zarr:
+        if args.model_parquet:
+            sys.exit("--model-zarr and --model-parquet name two different "
+                     "models; pass one.")
+        use_model_zarr(args.model_zarr, args.aws_profile)
+        print(f"model: {ZARR_URL}"
+              + (f" (profile {args.aws_profile})" if ZARR_STORAGE_OPTIONS else ""))
+
     source = source_from_args(args)
     note_unused_data_dir(args, source)
 
@@ -1844,7 +2836,10 @@ def main() -> None:
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    gauges = build_gauge_table(args.vpu, source)
+    group_names = [c.strip() for c in (args.group_by or "").split(",") if c.strip()]
+    gauges = build_gauge_table(args.vpu, source, group_names)
+    groups_meta = [{"key": k, "name": v}
+                   for k, v in gauges.attrs.get("groups", {}).items()]
     if args.model_parquet:
         model = model_q_from_parquet(args.model_parquet,
                                      gauges["final_river_id"].to_numpy(),
@@ -1880,49 +2875,107 @@ def main() -> None:
         print(f"      warm-up: dropped the first {args.warmup_years}y, "
               f"scoring {args.start} .. {args.end} ({len(model):,} days)")
 
-    metrics = compute_metrics(gauges, model, args.min_years, source)
+    corrections = None
+    if args.bias_correct and args.mode in ("decision", "both"):
+        corrections = fetch_corrections(gauges["final_river_id"], model)
+    elif args.bias_correct:
+        print("      --bias-correct ignored: it only feeds the volume decision")
 
-    pq = os.path.join(args.outdir, f"vpu{args.vpu}_metrics.parquet")
-    print(f"[4/5] writing {len(metrics)} rows -> {pq}")
-    metrics.to_parquet(pq, index=False)
+    metrics = compute_metrics(gauges, model, args.min_years, source, args.mode,
+                              corrections)
+
+    # Gauge attributes belong in both tables; everything named hs_* or tr_* is
+    # a decision and belongs only in the decision one.
+    ATTRS = ("final_river_id", "gauge_id", "fname", "latitude", "longitude",
+             "strmOrder", "USContArea", "ISO_A3", "river_name",
+             "first_day", "last_day", "n_pairs") + tuple(
+                 c for c in metrics.columns if re.fullmatch(r"g\d+", c))
+    # EVERY decision's prefix must be here or its columns are silently dropped
+    # from the decision table while the console summary, which reads the
+    # in-memory frame, still reports them. Adding a decision means adding its
+    # prefix here.
+    is_decision = lambda c: c.startswith(DECISION_PREFIXES)
+
+    written = []
+    if args.mode in ("statistic", "both"):
+        stat = metrics[[c for c in metrics.columns if not is_decision(c)]]
+        pq = os.path.join(args.outdir, f"vpu{args.vpu}_metrics.parquet")
+        print(f"[4/5] writing {len(stat)} rows -> {pq}")
+        stat.to_parquet(pq, index=False)
+        written.append(pq)
+    if args.mode in ("decision", "both"):
+        cols = [c for c in metrics.columns if is_decision(c) or c in ATTRS]
+        dec = metrics[cols]
+        # Only gauges that answered at least one decision reach this table; the
+        # rest still appear in the metric table, and serve.py greys them.
+        vcols = [c for c in ("hs_verdict", "tr_verdict") if c in dec.columns]
+        if vcols:
+            dec = dec[dec[vcols].notna().any(axis=1)]
+        pq = os.path.join(args.outdir, f"vpu{args.vpu}_decisions.parquet")
+        print(f"      writing {len(dec)} rows -> {pq}")
+        dec.to_parquet(pq, index=False)
+        written.append(pq)
+    pq = written[0]
 
     # Record the run configuration next to the parquet. serve.py and
     # build_webapp.py read this rather than importing the module constants, so
     # that a non-default --start/--end cannot leave them describing, or slicing
     # to, a window the metrics were not computed over.
-    cfg = os.path.join(args.outdir, f"vpu{args.vpu}_run.json")
-    with open(cfg, "w", encoding="utf-8") as fh:
-        json.dump({
-            "vpu": args.vpu,
-            "label": args.label,
+    # Under "both" the SAME config is written beside both parquets. That is the
+    # point of the combined mode: one resolved window, recorded identically in
+    # two places, so serve.py's window check cannot fail on files that came out
+    # of one run. They previously drifted whenever the two modes were run on
+    # different days, because an unset --end resolves to the zarr's end date,
+    # and the retrospective advances.
+    cfgs = []
+    if args.mode in ("statistic", "both"):
+        cfgs.append(os.path.join(args.outdir, f"vpu{args.vpu}_run.json"))
+    if args.mode in ("decision", "both"):
+        cfgs.append(os.path.join(args.outdir, f"vpu{args.vpu}_decisions_run.json"))
+    for cfg in cfgs:
+        with open(cfg, "w", encoding="utf-8") as fh:
+            json.dump({
+                "vpu": args.vpu,
+                "mode": args.mode,
+                "label": args.label,
             # date_start is the EVALUATION start, after any warm-up trim, and is
             # what the page reports. cache_start is the window the model array
             # was fetched over and names the cache file; build_webapp.py needs
             # it to find the same array. They differ only when --warmup-years
             # is used.
-            "date_start": args.start,
-            "date_end": args.end,
-            "cache_start": cache_start,
-            "warmup_years": args.warmup_years,
-            "min_years": args.min_years,
-            "n_gauges": int(len(metrics)),
-            # Which observations were scored. A local directory carries no
-            # version of its own, so without this the same command can produce
-            # different numbers from a re-downloaded copy with nothing saying
-            # so; for S3 the snapshot tag pins it exactly.
-            "gauge_source": source.kind,
-            "gauge_source_detail": source.describe(),
-            "kge_col": KGE_COL,
-            "kge_label": KGE_LABEL,
-            "kge_no_skill": KGE_NO_SKILL,
-        }, fh, indent=2)
-    print(f"      run config -> {cfg}")
+                "date_start": args.start,
+                "date_end": args.end,
+                "cache_start": cache_start,
+                "warmup_years": args.warmup_years,
+                "min_years": args.min_years,
+                "n_gauges": int(len(metrics)),
+                # Which observations were scored. A local directory carries no
+                # version of its own, so without this the same command can
+                # produce different numbers from a re-downloaded copy with
+                # nothing saying so; for S3 the snapshot tag pins it exactly.
+                "groups": groups_meta,
+                "gauge_source": source.kind,
+                "gauge_source_detail": source.describe(),
+                "kge_col": KGE_COL,
+                "kge_label": KGE_LABEL,
+                "kge_no_skill": KGE_NO_SKILL,
+            }, fh, indent=2)
+        print(f"      run config -> {cfg}")
+
+    if args.mode in ("decision", "both"):
+        # No decision map is drawn here: the PNG is the KGE' map, and the
+        # decision verdicts are a map serve.py draws, not this script.
+        summarize_decision(metrics)
+    if args.mode == "decision":
+        print(f"\nwrote {pq}")
+        return
 
     png = os.path.join(args.outdir, f"vpu{args.vpu}_kge_map.png")
     plot_kge_map(metrics, args.vpu, png, args.start, args.end, args.label)
 
     summarize(metrics)
-    print(f"\nwrote {pq}\nwrote {png}")
+    written.append(png)
+    print("\n" + "\n".join(f"wrote {p}" for p in written))
 
 
 if __name__ == "__main__":

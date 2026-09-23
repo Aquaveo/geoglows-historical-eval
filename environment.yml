@@ -29,9 +29,16 @@ dependencies:
   - scipy>=1.11
 
   # zarr access over plain HTTP.
-  # zarr is pinned below 3.0 on purpose: the 3.x rewrite changed the store API,
-  # and this code uses the v2 pattern `zarr.open(fsspec.get_mapper(url))`.
-  - zarr>=2.16,<3
+  # zarr 3 is REQUIRED, not merely allowed: the RFS v3 retrospective is written
+  # in zarr FORMAT 3 (a `zarr.json` store rather than `.zgroup`/`.zarray`) and
+  # zarr 2.x cannot open it at all -- it raises PathNotFoundError.
+  #
+  # This was previously pinned <3 because the 3.x rewrite changed the store API.
+  # Tested on zarr 3.4.0: `zarr.open(fsspec.get_mapper(url))` still works, and
+  # reads BOTH the format-2 v2 store over anonymous HTTP and the format-3 v3
+  # store over s3:// with a profile. The pattern this code uses did not break.
+  - zarr>=3
+  - s3fs           # s3:// stores, for --model-zarr against a private bucket
   - fsspec>=2024.2
   - aiohttp        # fsspec's HTTP filesystem backend
   - requests
@@ -42,9 +49,15 @@ dependencies:
   # which is the default when no local gauge directory is present.
   - s3fs>=2024.2
 
-  # serve.py queries the retrospective per reach through this package.
-  # kge_map.py does not need it -- that one reads the zarr directly.
+  # serve.py queries the retrospective per reach through this package, and
+  # kge_map.py calls geoglows.analyze.gumbel1 and geoglows.bias so the return
+  # levels and the bias correction cannot drift from RFS.
   - geoglows>=2.2
+  # `import geoglows` pulls in its plotting stack, which imports pytz -- so this
+  # is needed even though nothing here plots with geoglows. It is not declared
+  # by the package itself, and without it every run dies at the first gumbel1
+  # call with ModuleNotFoundError: No module named 'pytz'.
+  - pytz
 
   # file formats
   - pyarrow>=15     # parquet (metrics table, GEOGLOWS model table)

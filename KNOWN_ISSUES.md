@@ -705,6 +705,48 @@ name.
 
 ---
 
+## T. Suggestion, NOT implemented: a two-run comparison page
+
+Right now comparing two runs means two servers on two ports and two browser tabs, with the run
+label in the tab title and the top-right of the masthead. That works but puts the differencing
+in the reader's head.
+
+What was asked for: given two runs that have ALREADY been scored, one page showing which metrics
+improved, which got worse, and how.
+
+**The plumbing is easy.** Both parquets share a schema and key on `final_river_id`, so it is a
+join and a subtraction. The frontend is already generic over metrics -- the map, the colour
+scales, the picker and the summary tab do not know what they are drawing -- so a delta would
+reuse nearly all of it. Half a day for something that renders.
+
+**The semantics are where the work is**, and four things would be wrong if done naively:
+
+1. **"Improved" is not "went up."** KGE' higher is better; PBIAS is better CLOSER TO ZERO, so
+   -40% to -60% is worse while a plain subtraction calls it an increase; FAR lower is better;
+   alpha, beta and gamma are best at 1. The direction is already encoded per metric in
+   explorer.html as `opt` and `dv`, so the information exists -- but the delta has to be driven
+   by it rather than by arithmetic.
+
+2. **The gauge sets may differ.** Two runs over different model sources do not score identical
+   gauges -- the v2/v3 hydrofabrics differ by ~2M rivers. A comparison has to be on the
+   INTERSECTION and has to say how many gauges fell out of each side, or the difference measured
+   is partly "which gauges survived".
+
+3. **Decisions are categorical, not numeric.** A verdict moving Weak -> Good is not a delta. The
+   useful object is a transition matrix -- how many gauges moved which way, per decision -- and
+   that is arguably the most interesting part of the whole comparison, not an afterthought.
+
+4. **Most per-gauge differences will be noise.** Already measured: at the 10-year flood level
+   between-gauge variation is entirely sampling noise, and at the 2-year level only ~63% is
+   real. The difference between two runs at ONE gauge is noisier than either estimate. A page
+   that colours every small change would show spatial patterns that are not there -- the same
+   trap decision mode kept hitting. Some significance handling is needed, or the page should
+   aggregate rather than map per gauge.
+
+**Estimate:** half a day to render something, two to three days to render something that is not
+misleading. Item 4 decides whether it is worth building at all -- if per-gauge deltas are mostly
+noise then the honest product is a summary of distributions, not a difference map.
+
 ## Not an issue, recorded for reference
 
 - **Stream order and drainage area are available** in `tables/v2-model-table.parquet`

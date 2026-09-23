@@ -174,6 +174,33 @@ h1, h2, h3, .display {
 }
 
 .ctl { display: flex; align-items: center; gap: 8px; }
+/* Verdict key. Floats over the map in the legend's slot -- it IS the legend in
+   decision mode, and only one of the two is ever shown. */
+#verdictKey {
+  position: absolute; left: 14px; bottom: 14px; max-width: 340px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--rule); border-radius: 7px; padding: 9px 11px;
+  box-shadow: var(--shadow); backdrop-filter: blur(6px);
+  display: flex; flex-direction: column; gap: 4px;
+}
+#verdictKey .vqn {
+  font-size: 10px; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-3); margin-bottom: 4px;
+}
+#verdictKey .vrow { display:flex; align-items:baseline; gap:7px; font-size:11.5px; }
+#verdictKey .vsw { width:10px; height:10px; border-radius:3px; flex:none;
+                   box-shadow:0 0 0 1px rgba(0,0,0,.18) inset; position:relative; top:1px; }
+#verdictKey .vlab { font-weight:600; min-width:56px; }
+#verdictKey .vnote { opacity:.7; flex:1; }
+#verdictKey .vnum { opacity:.7; white-space:nowrap; font-size:11px; }
+/* Decision mode keeps the statistics available but out of the way -- a reader
+   who wants them opens them, rather than meeting fourteen numbers uninvited. */
+.moremetrics > summary {
+  cursor: pointer; font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  color: var(--ink-3); padding: 2px 0; user-select: none;
+}
+.moremetrics > summary:hover { color: var(--ink-1); }
+.moremetrics[open] > summary { margin-bottom: 6px; }
 .ctl > label {
   font-size: 10.5px; font-weight: 600; letter-spacing: .07em;
   text-transform: uppercase; color: var(--ink-3); white-space: nowrap;
@@ -486,6 +513,13 @@ svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
       <button id="tabSum" aria-pressed="false">Summary</button>
     </div>
 
+    <!-- Hidden unless a decision parquet was merged, so a statistics-only run
+         looks exactly as it did before this control existed. -->
+    <div class="ctl" id="modeCtl" hidden>
+      <label>Mode</label>
+      <div class="chips" id="modes"></div>
+    </div>
+
     <div class="ctl" id="metricCtl">
       <label for="metric">Colour by</label>
       <select id="metric"></select>
@@ -528,6 +562,9 @@ svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
         <div class="lgticks" id="lgTicks"></div>
         <div class="lgnote" id="lgNote"></div>
       </div>
+      <!-- Same slot as the colour-bar legend: over the map, not in the control
+           band. Only one of the two is ever visible. -->
+      <div id="verdictKey" hidden></div>
       <div id="tip" class="num"></div>
     </div>
 
@@ -596,6 +633,113 @@ const METRICS = [
   {k:"freq_bias",   n:"Frequency bias",            dv:1, lo:0,  hi:2,   opt:1, dec:2},
   {k:"nrmse",       n:"NRMSE (÷ mean flow)",        seq:1, pal:"heat", log:1, lo:0.5, hi:20, opt:0, dec:2},
   {k:"mae_rel",     n:"MAE ÷ mean flow",            seq:1, pal:"heat", lo:0, hi:3, opt:0, dec:2},
+
+  // DECISION MODE -- "does the model inform this decision correctly", scored on
+  // HydroSOS monthly low-flow status. Present only when a decision parquet was
+  // merged; a gauge without one draws as no value, meaning the record was too
+  // short to place the category breakpoints, NOT that the model failed.
+  //
+  // Every score below is already chance-corrected, so dv sits on 0 and the grey
+  // midpoint IS the chance line -- orange is worse than guessing, blue better.
+  // The one exception is agreement, which is raw: its chance value is fixed by
+  // construction at 0.10^2+0.15^2+0.50^2+0.15^2+0.10^2 = 0.315, so dv goes there
+  // instead of on 0.5, which would put the midpoint somewhere meaningless.
+  //
+  // lo/hi are symmetric about the chance line so the two arms carry equal visual
+  // weight, and are set from the measured spread on VPU 714 (kappa p95 +0.47,
+  // the ETS pair p95 +0.31..0.34) rather than the theoretical +/-1, which would
+  // render every gauge the same pale blue.
+  // DECISION MODE is one question with one answer per gauge -- deliberately no
+  // statistics and no metric choice. The five states are a category, not a
+  // scale, so this entry carries an explicit colour per value instead of lo/hi.
+  {k:"hs_verdict", n:"Does the model identify severe low flow?", mode:"decision",
+   cat:1, dec:0,
+   states:[
+     { v: 3, key:"green", label:"Yes",       note:"catches at least half of severe dry months" },
+     { v: 2, key:"good",  label:"Mostly",    note:"catches a third to a half" },
+     { v: 1, key:"weak",  label:"Weakly",    note:"better than luck, catches under a third" },
+     // NOT "no better than luck" -- the test is one-sided, so it cannot assert
+     // equality with luck. What it concludes is that the hits fall inside the
+     // range luck alone produces, which covers at-chance gauges, below-chance
+     // ones, and gauges too short to prove a real effect. Measured on five
+     // VPUs, gauges SIGNIFICANTLY worse than luck are 0.0-0.3% of the map, so
+     // they get no state of their own.
+     { v: 0, key:"no",    label:"No",        note:"hits are within what luck alone would produce" },
+     { v:-1, key:"grey",  label:"Can't say", note:"not enough data to judge" },
+   ]},
+
+  // Decision 3. "Neither finds a trend" is deliberately NOT green: it is the
+  // model being silent where there was nothing to detect, and it is half the
+  // gauges on VPU 714. Scoring it as a success would report 55% correct off
+  // what is, 89% of the time, mutual silence.
+  {k:"tr_verdict", n:"Does the model see how the river is changing?", mode:"decision",
+   cat:1, dec:0,
+   states:[
+     { v: 3, key:"green", label:"Agrees",     note:"both see a trend, same direction" },
+     { v: 2, key:"none",  label:"Nothing",    note:"neither finds a trend — not a pass mark" },
+     { v: 1, key:"weak",  label:"Misses it",  note:"the river is changing, the model does not see it" },
+     { v: 0, key:"no",    label:"Invents one",note:"the model reports a trend the gauge does not show" },
+     { v:-1, key:"grey",  label:"Can't say",  note:"not enough data to judge" },
+   ]},
+
+  // The ONLY decision here whose bands come from published literature:
+  // Moriasi et al. (2007) Table 4, the standard streamflow performance ratings
+  // in hydrologic model evaluation. Scored on the GEOGLOWS global bias
+  // correction, without which the raw model is 66% unsatisfactory.
+  {k:"vol_verdict", n:"Is the annual volume of water representative?", mode:"decision",
+   cat:1, dec:0,
+   states:[
+     { v: 3, key:"green", label:"Very good", note:"volume within 10% (Moriasi et al. 2007)" },
+     { v: 2, key:"good",  label:"Good",      note:"within 10–15%" },
+     { v: 1, key:"weak",  label:"Satisfactory", note:"within 15–25%" },
+     { v: 0, key:"no",    label:"Unsatisfactory", note:"off by more than 25%" },
+     { v:-1, key:"grey",  label:"Can't say", note:"no bias-corrected series for this reach" },
+   ]},
+
+  // Floods above each series' OWN 2-year level, so magnitude divides out --
+  // this says whether a flood turns up and when, NOT whether it was the right
+  // size. "Strong" is the point where hits equal misses plus false alarms; no
+  // gauge in five VPUs reaches it, and the empty band is deliberate, being a
+  // fixed reference rather than a cut taken from this run's own spread.
+  {k:"fl_verdict", n:"Does the model show a flood when the river floods?", mode:"decision",
+   cat:1, dec:0,
+   states:[
+     { v: 2, key:"green", label:"Strong", note:"as many hits as misses and false alarms combined" },
+     { v: 1, key:"good",  label:"Beats luck", note:"better than chance, but short of that" },
+     { v: 0, key:"no",    label:"No",     note:"cannot be shown to beat luck" },
+     { v:-1, key:"grey",  label:"Can't say", note:"fewer than 5 floods on record" },
+   ]},
+
+  // Banded straight off the daily rank correlation already in the metric table.
+  // Unlike the other two this scores EVERY gauge in every VPU -- the estimate
+  // rests on ~20,000 daily pairs rather than 50 annual values, so it does not
+  // run out of evidence. Bands are provisional; see DECISION_MODE.md.
+  {k:"wd_verdict", n:"Does the model tell wet days from dry days?", mode:"decision",
+   cat:1, dec:0,
+   states:[
+     { v: 3, key:"green", label:"Strong", note:"daily rank correlation 0.70 and above" },
+     { v: 2, key:"good",  label:"Good",   note:"0.50 to 0.70" },
+     { v: 1, key:"weak",  label:"Weak",   note:"0.30 to 0.50" },
+     { v: 0, key:"no",    label:"Poor",   note:"under 0.30" },
+     { v:-1, key:"grey",  label:"No value", note:"correlation could not be computed" },
+   ]},
+];
+// Traffic light. Red/green is the one pairing that fails for the commonest
+// colour-vision deficiency, so the two poles are pushed apart in lightness as
+// well as hue and every dot carries its word in the panel and the tooltip --
+// the colour is never the only channel saying what the verdict is.
+// "none" is a NEUTRAL slate, not a shade of green or red -- it marks gauges
+// where no question was asked, and must not read as either an endorsement or a
+// failure. Distinct in hue from grey, which means "could not judge".
+const VERDICT_COLORS_LIGHT = { green:"#1b7f3b", good:"#7cb342", weak:"#e8a020", no:"#c62828", none:"#7a8b99", grey:"#b9b7b0" };
+const VERDICT_COLORS_DARK  = { green:"#4caf6d", good:"#9ccc65", weak:"#f0b849", no:"#ef5350", none:"#8fa3b3", grey:"#6e6c66" };
+let VERDICT_COLORS = VERDICT_COLORS_LIGHT;
+const stateOf = (m, v) => (m.states || []).find(s => s.v === v) || null;
+// A metric with no explicit mode belongs to the statistics side.
+const metricMode = m => m.mode || "statistic";
+const MODES = [
+  {k:"statistic", n:"Statistics", d:"How closely the hydrograph matches"},
+  {k:"decision",  n:"Decisions",  d:"Whether the model informs a decision correctly"},
 ];
 const M = Object.fromEntries(METRICS.map(m => [m.k, m]));
 
@@ -659,6 +803,7 @@ const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(
 const themeMode = () => (cssVar("--ramp-mode") || "").replace(/["'\s]/g, "") === "dark" ? "dark" : "light";
 function syncRamp() {
   const d = themeMode() === "dark";
+  VERDICT_COLORS = d ? VERDICT_COLORS_DARK : VERDICT_COLORS_LIGHT;
   RAMP = d ? RAMP_DARK : RAMP_LIGHT;
   SEQ  = d ? SEQ_DARK  : SEQ_LIGHT;
   HEAT = d ? HEAT_DARK : HEAT_LIGHT;
@@ -703,13 +848,21 @@ function rampFor(m) {
 }
 function colorFor(m, v) {
   if (v == null || !isFinite(v)) return null;
+  if (m.cat) {                        // categorical: an explicit colour per state
+    const s = stateOf(m, Math.round(v));
+    return s ? VERDICT_COLORS[s.key] : null;
+  }
   const t = Math.max(0, Math.min(1, scalePos(m, v)));
   return interp(rampFor(m), t);
 }
 
 /* ---- state --------------------------------------------------------------- */
 let D = null, ORDERS = [];
-const S = { metric:"kge_2012", month:null, minYears:0, orders:new Set(), onlyBad:false, sel:null, hover:null };
+const S = { metric:"kge_2012", mode:"statistic", month:null, minYears:0, orders:new Set(), onlyBad:false, sel:null, hover:null };
+// Each mode remembers the metric last chosen in it, so flipping Decisions ->
+// Statistics -> Decisions returns to the decision score you were looking at
+// rather than resetting to the first one in the list.
+const LAST_METRIC = { statistic:"kge_2012", decision:null };
 const MONTH_NAMES = ["January","February","March","April","May","June",
                      "July","August","September","October","November","December"];
 // Monthly metrics live in per-month columns (r_m01 .. r_m12) rather than one
@@ -1338,15 +1491,24 @@ function renderGauge(g) {
     <div class="meta">
       ${g.lat.toFixed(3)}°, ${g.lon.toFixed(3)}° · order ${g.so ?? "—"} ·
       ${g.da!=null ? sig(g.da)+" km² upstream" : "area —"}<br>
-      ${g.y0}–${g.y1} · ${(g.n_pairs/365.25).toFixed(0)} yr paired${g.kp ? " · "+g.kp : ""}
+      ${g.y0}–${g.y1} · ${(g.n_pairs/365.25).toFixed(0)} yr paired${
+        ((D.groups||[]).map(q => g[q.key]).filter(Boolean)[0]) ? " · "+(D.groups||[]).map(q => g[q.key]).filter(Boolean)[0] : ""}
     </div>
 
     <div class="sec">
-      <h3>${monthLabel()}</h3>
-      <div class="hero"><span class="v num">${fmt(mval(g), m.dec)}</span></div>
+      <h3>${!m.cat ? monthLabel()
+            : m.k === "tr_verdict" ? "Wetter or drier"
+            : m.k === "wd_verdict" ? "Wet and dry days"
+            : m.k === "fl_verdict" ? "Floods"
+            : m.k === "vol_verdict" ? "Volume of water"
+            : "Severe low flow"}</h3>
+      ${m.cat ? verdictPanel(g, m) :
+        `<div class="hero"><span class="v num">${fmt(mval(g), m.dec)}</span></div>`}
       <div id="vd"></div>
     </div>
 
+    ${m.cat ? `<details class="moremetrics" id="moreDetail">
+      <summary>Show the statistics and charts behind this</summary>` : ``}
     <div class="sec">
       <h3>All metrics</h3>
       <table class="kv">
@@ -1437,6 +1599,7 @@ function renderGauge(g) {
         paired record, and every metric is recomputed from that month's days alone. The
         twelve values therefore do not average back to the annual figure. Scrolls sideways.</div>
     </div>
+    ${m.cat ? `</details>` : ``}
 
 `;
   rail.appendChild(wrap);
@@ -1448,25 +1611,36 @@ function renderGauge(g) {
     wrap.querySelector("#vd").appendChild(b);
   }
 
-  const comp = wrap.querySelector("#comp");
-  [["r",g.r],["γ",g.gamma],["β",g.beta]].forEach(([nm,v]) => {
-    const dev = v==null||!isFinite(v) ? 0 : Math.max(-1, Math.min(1, v-1));
-    const row = document.createElement("div"); row.className = "row";
-    row.innerHTML = `<span class="nm">${nm}</span>
-      <span class="track"><span class="mid" style="left:50%"></span>
-        <span class="fill" style="${dev>=0?"left:50%":"right:50%"};width:${Math.abs(dev)*50}%;
-          background:${colorFor({dv:0,lo:-1,hi:1}, -Math.abs(dev))}"></span></span>
-      <span class="vv num">${fmt(v)}</span>`;
-    comp.appendChild(row);
-  });
+  // Everything below the verdict is charts and tables. In decision mode they
+  // live inside a closed <details>, and a chart drawn into a display:none
+  // container measures zero width -- so the work is deferred until it is
+  // actually opened, and done once.
+  function fillDetail() {
+    const comp = wrap.querySelector("#comp");
+    if (comp && !comp.childElementCount) {
+      [["r",g.r],["γ",g.gamma],["β",g.beta]].forEach(([nm,v]) => {
+        const dev = v==null||!isFinite(v) ? 0 : Math.max(-1, Math.min(1, v-1));
+        const row = document.createElement("div"); row.className = "row";
+        row.innerHTML = `<span class="nm">${nm}</span>
+          <span class="track"><span class="mid" style="left:50%"></span>
+            <span class="fill" style="${dev>=0?"left:50%":"right:50%"};width:${Math.abs(dev)*50}%;
+              background:${colorFor({dv:0,lo:-1,hi:1}, -Math.abs(dev))}"></span></span>
+          <span class="vv num">${fmt(v)}</span>`;
+        comp.appendChild(row);
+      });
+    }
+    const fb = wrap.querySelector("#flood");
+    if (fb && !fb.childElementCount) fb.appendChild(floodBlock(g));
+    const mt = wrap.querySelector("#montbl");
+    if (mt && !mt.childElementCount) mt.appendChild(monthlyTable(g));
+    const rk = wrap.querySelector("#rank");
+    if (rk && !rk.childElementCount) rk.appendChild(rankBlock(g));
+    if (!wrap._seriesLoaded) { wrap._seriesLoaded = true; loadSeries(g, wrap); }
+  }
 
-  const fb = wrap.querySelector("#flood");
-  if (fb) fb.appendChild(floodBlock(g));
-  const mt = wrap.querySelector("#montbl");
-  if (mt) mt.appendChild(monthlyTable(g));
-  const rk = wrap.querySelector("#rank");
-  if (rk) rk.appendChild(rankBlock(g));
-  loadSeries(g, wrap);
+  const more = wrap.querySelector("#moreDetail");
+  if (more) more.addEventListener("toggle", () => { if (more.open) fillDetail(); });
+  else fillDetail();
 }
 
 async function loadSeries(g, wrap) {
@@ -1568,9 +1742,100 @@ const renderRail = () => {
 };
 
 /* ---- legend -------------------------------------------------------------- */
+// The verdict in words, with the arithmetic that produced it. A traffic light
+// that cannot be interrogated is a claim on trust; this says what was counted.
+function verdictPanel(g, m) {
+  const s = stateOf(m, Math.round(g[m.k]));
+  if (!s) return "";
+  const head = `<div class="hero"><span class="v" style="color:${VERDICT_COLORS[s.key]}">` +
+               `${s.label}</span></div><div class="meta">${s.note}</div>`;
+
+  if (m.k === "vol_verdict") {
+    if (s.key === "grey") {
+      return head + `<div class="meta" style="margin-top:6px">The published SFDC
+        correction table holds a zero for this reach, so no corrected series exists.
+        That is a gap in the correction data, not in the gauge record.</div>`;
+    }
+    const p = g.vol_pbias, praw = g.vol_pbias_raw;
+    const dir = v => v == null ? "" : (v > 0 ? "too much water" : "too little water");
+    // Both are computed over the identical day set, so the pair is a statement
+    // about what the correction did at THIS gauge -- which is not always help.
+    const verdictOfRaw = v => v == null ? "" :
+      Math.abs(v) < 10 ? "very good" : Math.abs(v) < 15 ? "good"
+      : Math.abs(v) < 25 ? "satisfactory" : "unsatisfactory";
+    let note = "";
+    if (p != null && praw != null) {
+      const d = Math.abs(praw) - Math.abs(p);
+      note = Math.abs(d) < 0.5 ? "The correction barely changed this gauge."
+           : d > 0 ? `The correction improved it by ${d.toFixed(1)} percentage points.`
+                   : `The correction made it worse by ${(-d).toFixed(1)} percentage points.`;
+    }
+    return head + `<table class="kv" style="margin-top:8px">
+      <tr><td>Before correction</td><td class="num">${fmt(praw, 1)}% ${dir(praw)}</td></tr>
+      <tr><td><b>After correction</b></td><td class="num"><b>${fmt(p, 1)}% ${dir(p)}</b></td></tr>
+      <tr><td>Rating before</td><td>${verdictOfRaw(praw)}</td></tr>
+      <tr><td>Days compared</td><td class="num">${(g.vol_n_days||0).toLocaleString()}</td></tr>
+    </table>
+    <div class="meta" style="margin-top:6px">${note}</div>
+    <div class="meta" style="margin-top:4px">Scored on the GEOGLOWS global bias correction.
+      Bands are the published streamflow ratings of Moriasi et al. (2007).</div>`;
+  }
+
+  if (m.k === "fl_verdict") {
+    if (s.key === "grey") {
+      return head + `<div class="meta" style="margin-top:6px">Fewer than five floods
+        above the ${(D.flood&&D.flood.rp)??2}-year level on this record.</div>`;
+    }
+    return head + `<table class="kv" style="margin-top:8px">
+      <tr><td>Floods the river had</td><td class="num">${g.fl_n_obs ?? "—"}</td></tr>
+      <tr><td>Of those, the model showed within ${(D.flood&&D.flood.window)??"—"} day${((D.flood&&D.flood.window)===1)?"":"s"}</td><td class="num">${g.fl_hits ?? "—"}</td></tr>
+      <tr><td>Floods the model had that the river did not</td><td class="num">${g.fl_false ?? "—"}</td></tr>
+      <tr><td>CSI</td><td class="num">${fmt(g.fl_csi, 3)}</td></tr>
+    </table>
+    <div class="meta" style="margin-top:6px">Each series uses its own ${(D.flood&&D.flood.rp)??2}-year level, so
+      this asks whether a flood turned up and when — not whether it was the right size.</div>`;
+  }
+
+  if (m.k === "wd_verdict") {
+    return head + `<table class="kv" style="margin-top:8px">
+      <tr><td>Daily rank correlation</td><td class="num">${fmt(g.spearman, 3)}</td></tr>
+      <tr><td>Days compared</td><td class="num">${(g.n_pairs||0).toLocaleString()}</td></tr>
+    </table>
+    <div class="meta" style="margin-top:6px">Seasonality contributes to this: a model
+      knowing only the calendar scores about 0.50 here.</div>`;
+  }
+
+  if (m.k === "tr_verdict") {
+    if (s.key === "grey") {
+      return head + `<div class="meta" style="margin-top:6px">Fewer than 30 years with
+        enough paired days to test a trend.</div>`;
+    }
+    const word = v => v > 0 ? "getting wetter" : v < 0 ? "getting drier" : "no trend";
+    return head + `<table class="kv" style="margin-top:8px">
+      <tr><td>The gauge says</td><td>${word(g.tr_obs)}</td></tr>
+      <tr><td>The model says</td><td>${word(g.tr_sim)}</td></tr>
+      <tr><td>Years compared</td><td class="num">${g.tr_n_years ?? "—"}</td></tr>
+    </table>`;
+  }
+
+  if (s.key === "grey") {
+    return head + `<div class="meta" style="margin-top:6px">The record is too short to` +
+           ` place the categories — some calendar month has 10 or fewer usable years.</div>`;
+  }
+  const k = g.hs_xdry_n_events, a = g.hs_xdry_hits;
+  const pct = (k > 0) ? (100*a/k).toFixed(0) : "—";
+  return head + `<table class="kv" style="margin-top:8px">
+      <tr><td>Severe dry months on record</td><td class="num">${k ?? "—"}</td></tr>
+      <tr><td>Of those, the model caught</td><td class="num">${a ?? "—"} · ${pct}%</td></tr>
+    </table>`;
+}
+
 function renderLegend() {
   const m = M[S.metric];
   const lg = document.querySelector(".legend");
+  // A categorical verdict has no continuous ramp to draw; #verdictKey names the
+  // states instead, so the gradient bar is hidden rather than drawn meaningless.
+  if (m && m.cat) { if (lg) lg.hidden = true; return; }
   if (lg) lg.hidden = needsMonth();   // no scale to show yet
   if (needsMonth()) return;
   document.getElementById("lgLab").textContent = monthLabel();
@@ -1645,7 +1910,8 @@ cv.addEventListener("pointermove", e => {
   const g = needsMonth() ? null : nearest(mx,my);
   if (g !== S.hover) { S.hover = g; draw(); }
   if (g) {
-    tip.textContent = `${g.g} · ${fmt(mval(g), M[S.metric].dec)}`;
+    const _m = M[S.metric], _s = _m.cat ? stateOf(_m, Math.round(mval(g))) : null;
+    tip.textContent = `${g.g} · ${_s ? _s.label : fmt(mval(g), _m.dec)}`;
     tip.style.left = (mx+14)+"px"; tip.style.top = (my+14)+"px"; tip.classList.add("on");
   } else tip.classList.remove("on");
 });
@@ -1783,12 +2049,26 @@ function floodBlock(g) {
 // by a categorical season/group palette. Two reasons: the group is already named
 // on the axis so a second encoding of it would be redundant, and it keeps one
 // visual language across the whole page.
-const GROUPINGS = [
+// Overall, stream order and month are intrinsic. Everything between them comes
+// from the catalog via --group-by and is named in the payload, so adding a
+// column to your catalog and naming it on the command line is all it takes to
+// get a new grouping here -- no change to this file.
+// Filled by rebuildGroupings() once the payload has landed -- the catalog
+// groupings are named in the payload, so this cannot be a load-time const.
+let GROUPINGS = [
   { k: "overall", n: "Overall" },
   { k: "so",      n: "Stream order" },
-  { k: "kp",      n: "Köppen group" },
   { k: "month",   n: "Month" },
 ];
+function rebuildGroupings() {
+  const cat = ((D && D.groups) || []).map(g => ({ k: g.key, n: g.name }));
+  GROUPINGS = [
+    { k: "overall", n: "Overall" },
+    { k: "so",      n: "Stream order" },
+    ...cat,
+    { k: "month",   n: "Month" },
+  ];
+}
 // Month is the one grouping that is cyclical, which is the one case a polar
 // layout genuinely earns: December sits next to January, as it should.
 const SUM = { group: "so", metric: "kge_2012", monthMetric: "kge_2012" };
@@ -1814,7 +2094,7 @@ function summaryRows() {
   if (SUM.group === "overall") {
     return [{ label: "All gauges", stats: statsFor(gs.map(g => g[SUM.metric])) }];
   }
-  const key = SUM.group;                       // "so" or "kp"
+  const key = SUM.group;                       // "so", "month", or a g0/g1 catalog grouping
   const buckets = new Map();
   for (const g of gs) {
     const v = g[key];
@@ -2190,6 +2470,8 @@ async function boot() {
     }
   }
 
+  rebuildGroupings();
+
   const pctl = (a,p) => { const v = a.filter(x=>x!=null&&isFinite(x)&&x>0).sort((x,y)=>x-y);
     return v.length ? v[Math.min(v.length-1, Math.floor(p*(v.length-1)))] : null; };
   // Only for a log metric that declares no bounds. Deriving them from the data
@@ -2215,10 +2497,114 @@ async function boot() {
   document.title = `${rawLabel()} — VPU ${D.vpu} — Gauge Skill Explorer`;
 
   const sel = document.getElementById("metric");
-  METRICS.forEach(m => { const o = document.createElement("option");
-    o.value = m.k; o.textContent = m.n; sel.appendChild(o); });
-  sel.value = S.metric;
-  sel.onchange = () => { S.metric = sel.value; renderLegend(); draw(); renderRail(); };
+
+  // A metric is offered only if some gauge actually carries a value for it.
+  // Without this a run with no decision parquet would list decision scores
+  // that colour nothing.
+  const has = k => D.gauges.some(g => g[k] !== undefined && g[k] !== null);
+  const inMode = mo => METRICS.filter(m => metricMode(m) === mo && has(m.k));
+
+  // The two modes are exclusive: choosing Decisions empties the picker of every
+  // statistic and vice versa. They answer different questions and mixing them in
+  // one list invites reading a KGE' and a kappa as comparable numbers.
+  function fillMetricSelect() {
+    sel.textContent = "";
+    const list = inMode(S.mode);
+    const groups = new Map();
+    list.forEach(m => {
+      const g = m.grp || "";
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(m);
+    });
+    groups.forEach((items, g) => {
+      const parent = g ? document.createElement("optgroup") : sel;
+      if (g) { parent.label = g; sel.appendChild(parent); }
+      items.forEach(m => { const o = document.createElement("option");
+        o.value = m.k; o.textContent = m.n; parent.appendChild(o); });
+    });
+    // Land on the metric last used in this mode, falling back to the first one
+    // offered -- S.metric from the other mode is not a valid option here and
+    // would leave the select showing nothing.
+    const want = LAST_METRIC[S.mode];
+    S.metric = (want && list.some(m => m.k === want)) ? want
+             : (list[0] ? list[0].k : S.metric);
+    LAST_METRIC[S.mode] = S.metric;
+    sel.value = S.metric;
+  }
+
+  // In decision mode the picker chooses the QUESTION, not a statistic, so it
+  // is relabelled rather than hidden.
+  function relabelPicker() {
+    const lab = document.querySelector('#metricCtl label');
+    if (lab) lab.textContent = (S.mode === "decision") ? "Question" : "Colour by";
+  }
+
+  function renderVerdictKey() {
+    const host = document.getElementById("verdictKey");
+    const m = M[S.metric];
+    if (S.mode !== "decision" || !m || !m.cat) { host.hidden = true; return; }
+    const counts = {};
+    (D.gauges || []).forEach(g => { const v = g[m.k];
+      if (v != null) counts[Math.round(v)] = (counts[Math.round(v)] || 0) + 1; });
+    const total = Object.values(counts).reduce((a, b) => a + b, 0) || 1;
+    host.innerHTML = `<div class="vqn">${m.n}</div>` + m.states.map(s => {
+      const n = counts[s.v] || 0;
+      return `<div class="vrow"><span class="vsw" style="background:${VERDICT_COLORS[s.key]}"></span>` +
+             `<span class="vlab">${s.label}</span>` +
+             `<span class="vnote">${s.note}</span>` +
+             `<span class="vnum num">${n} · ${(100*n/total).toFixed(1)}%</span></div>`;
+    }).join("");
+    host.hidden = false;
+  }
+
+  function setMode(mo) {
+    if (mo === S.mode) return;
+    S.mode = mo;
+    fillMetricSelect(); relabelPicker();
+    document.querySelectorAll("#modes .chip").forEach(b =>
+      b.setAttribute("aria-pressed", String(b.dataset.mode === mo)));
+    // A gauge with no value for the chosen metric is not drawn at all, so the
+    // selected gauge can vanish from under the detail panel on a mode change.
+    if (S.sel && (S.sel[S.metric] == null)) S.sel = null;
+    renderVerdictKey(); renderLegend(); draw(); renderRail();
+  }
+
+  // A decision parquet that exists but could not be merged shows its reason
+  // here. Without this the page is indistinguishable from one where decision
+  // mode was never built, which is what happened on 2026-09-17: the two runs
+  // covered windows two days apart, the merge was correctly refused, and the
+  // only trace was a line in the server log.
+  if (!inMode("decision").length && D.dNote) {
+    const el = document.getElementById("modeCtl");
+    el.hidden = false;
+    el.innerHTML = "";
+    const w = document.createElement("span");
+    w.style.cssText = "font-size:12px;color:#8a5a00;line-height:1.35";
+    w.textContent = D.dNote;
+    el.appendChild(w);
+  }
+
+  // Only worth showing when there is a second mode to switch to.
+  if (inMode("decision").length) {
+    const modesEl = document.getElementById("modes");
+    MODES.forEach(mo => {
+      const b = document.createElement("button");
+      b.className = "chip"; b.textContent = mo.n; b.title = mo.d;
+      b.dataset.mode = mo.k;
+      b.setAttribute("aria-pressed", String(mo.k === S.mode));
+      b.onclick = () => setMode(mo.k);
+      modesEl.appendChild(b);
+    });
+    document.getElementById("modeCtl").hidden = false;
+  }
+
+  fillMetricSelect();
+  relabelPicker();
+  renderVerdictKey();
+  sel.onchange = () => {
+    S.metric = sel.value; LAST_METRIC[S.mode] = S.metric;
+    renderVerdictKey(); renderLegend(); draw(); renderRail();
+  };
 
   const ordersEl = document.getElementById("orders");
   ORDERS.forEach(o => {

@@ -52,3 +52,6 @@ routing/
 # placeholder and no observations. Everything else matching *_explorer.html is a
 # build artefact.
 !webapp/explorer.html
+
+# Comparison pages are generated output, like everything in outputs*/.
+*_compare.html
