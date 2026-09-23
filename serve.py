@@ -187,6 +187,22 @@ def merge_decisions(m: pd.DataFrame, path: str, cfg: dict) -> pd.DataFrame:
                   f"--start {cfg.get('date_start')} --end {cfg.get('date_end')}")
             print("  " + "!" * 68 + "\n")
             return m
+    # Decision columns are dropped from the METRIC frame before merging. A
+    # metrics parquet written before the decision/statistic split was fixed
+    # still carries fl_* and vol_*, and `--mode decision` does not rewrite it --
+    # so the metric side claims those names first, pandas suffixes BOTH sides of
+    # the collision, and fl_verdict/vol_verdict stop existing under their own
+    # names. The failure is silent: the page simply stops offering those
+    # questions, because a question with no non-null values is not shown.
+    # hs_ and tr_ never hit this only because the metric table never had them.
+    dec_pref = tuple({c.split("_")[0] + "_" for c in VERDICT_COLS})
+    stale = [c for c in m.columns if c.startswith(dec_pref)]
+    if stale:
+        print(f"  note: the metrics parquet still carries {len(stale)} decision "
+              f"columns from before the split fix; ignoring them in favour of "
+              f"the decision table")
+        m = m[[c for c in m.columns if c not in stale]]
+
     keep = ["final_river_id"] + [c for c in DECISION_FIELDS if c in d.columns]
     merged = m.merge(d[keep], on="final_river_id", how="left")
     # A gauge in the metric table but absent from the decision table could not
