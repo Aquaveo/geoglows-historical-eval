@@ -1065,6 +1065,14 @@ def note_unused_data_dir(args, source) -> None:
 # wrong on ids and on anything numeric-but-categorical, and this project names
 # its inputs rather than deriving them. The default keeps Koppen working for
 # existing runs with no flag.
+# Bumped whenever a verdict's CODES change meaning -- not when a threshold moves,
+# but when a band is added, removed or renumbered. serve.py refuses a decision
+# parquet carrying a different value, because the failure is otherwise SILENT and
+# wrong rather than loud: when the flood decision went from four bands to three,
+# code 2 stopped meaning "good" and started meaning "strong", so every former
+# "good" gauge rendered green on a page that had already been updated.
+VERDICT_SCHEMA = 2
+
 GROUP_DEFAULT = "Koppen Group (as of 2024)"
 
 # Column prefixes that belong to the decision table rather than the metric one.
@@ -2072,7 +2080,19 @@ FLOOD_WINDOW = 2              # a match counts within +/- this many days
 # So 7 is not a tuned number; 5 or 14 would give the same answer. What actually
 # binds is FLOOD_SEP >= 2*FLOOD_WINDOW+1, i.e. >= 5 at the current window. Seven
 # leaves margin and sits in the flat region.
-FLOOD_SEP = 7                 # days two exceedances must be apart to be separate floods
+FLOOD_SEP = 5                 # days two exceedances must be apart to be separate floods
+
+# FLOOD_SEP is now sitting EXACTLY on its constraint: 2*FLOOD_WINDOW+1 = 5. There
+# is no margin, so raising the window without raising the separation would let
+# neighbouring match windows overlap and credit one modelled flood to two
+# observed ones -- inflating the hit rate silently, which is how an earlier +/-5
+# day figure came out wrong. Checked at import rather than left as a comment.
+if FLOOD_SEP < 2 * FLOOD_WINDOW + 1:
+    raise ValueError(
+        f"FLOOD_SEP ({FLOOD_SEP}) must be at least 2*FLOOD_WINDOW+1 "
+        f"({2 * FLOOD_WINDOW + 1}); below that the +/-{FLOOD_WINDOW} day match "
+        f"windows of two neighbouring floods overlap and one modelled flood can "
+        f"be counted as a hit for both.")
 FLOOD_ALPHA = 0.05            # one-sided; above this p-value the gauge is red
 # 0.50 is the point where hits equal misses plus false alarms -- the forecast
 # gets as much right as it gets wrong. It is arithmetic, not a published band:
@@ -2957,6 +2977,7 @@ def main() -> None:
             json.dump({
                 "vpu": args.vpu,
                 "mode": args.mode,
+                "verdict_schema": VERDICT_SCHEMA,
                 "label": args.label,
             # date_start is the EVALUATION start, after any warm-up trim, and is
             # what the page reports. cache_start is the window the model array

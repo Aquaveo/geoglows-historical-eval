@@ -42,7 +42,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import pandas as pd
 
-from kge_map import (CACHE_DIR, FLOOD_RP, FLOOD_SEP, FLOOD_WINDOW,
+from kge_map import (CACHE_DIR, FLOOD_RP, FLOOD_SEP, FLOOD_WINDOW, VERDICT_SCHEMA,
                      KGE_NO_SKILL, add_gauge_source_args,
                      framing_bbox, load_gauge_series, note_unused_data_dir,
                      source_from_args)
@@ -154,6 +154,22 @@ def merge_decisions(m: pd.DataFrame, path: str, cfg: dict) -> pd.DataFrame:
     if os.path.exists(dcfg_path):
         with open(dcfg_path, encoding="utf-8") as fh:
             dcfg = json.load(fh)
+        # Codes before codes: a verdict parquet from a different schema does not
+        # merely look stale, it renders WRONG -- the numbers are valid, they just
+        # mean something else now.
+        got = dcfg.get("verdict_schema")
+        if got != VERDICT_SCHEMA:
+            STATE["decision_note"] = (
+                f"Decision verdicts were not loaded: this parquet was written "
+                f"with verdict schema {got!r}, and the code now uses "
+                f"{VERDICT_SCHEMA}. The codes mean different things between "
+                f"them, so showing it would mislabel every gauge. Re-run "
+                f"kge_map.py --mode decision.")
+            print("\n  " + "!" * 68)
+            print(f"  {STATE['decision_note']}")
+            print("  " + "!" * 68 + "\n")
+            return m
+
         same = (dcfg.get("date_start") == cfg.get("date_start")
                 and dcfg.get("date_end") == cfg.get("date_end"))
         if not same:

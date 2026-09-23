@@ -704,8 +704,13 @@ const METRICS = [
   {k:"fl_verdict", n:"Does the model show a flood when the river floods?", mode:"decision",
    cat:1, dec:0,
    states:[
+     // "Beats luck" is AMBER, not green. It is 92% of gauges and it is the
+     // lowest bar in the system -- better than guessing, nothing more. Colouring
+     // it green makes the map read as "the model works here" and undoes visually
+     // the whole point of not calling chance a pass. Green is reserved for the
+     // one band that is a real claim: hits equalling misses plus false alarms.
      { v: 2, key:"green", label:"Strong", note:"as many hits as misses and false alarms combined" },
-     { v: 1, key:"good",  label:"Beats luck", note:"better than chance, but short of that" },
+     { v: 1, key:"weak",  label:"Beats luck", note:"better than chance, but well short of that" },
      { v: 0, key:"no",    label:"No",     note:"cannot be shown to beat luck" },
      { v:-1, key:"grey",  label:"Can't say", note:"fewer than 5 floods on record" },
    ]},
